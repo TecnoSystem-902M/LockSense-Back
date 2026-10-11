@@ -1,6 +1,9 @@
 <?php
 
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\UsuarioController;
+use App\Http\Controllers\CasilleroController;
 
 
 // Públicas
@@ -15,4 +18,26 @@ Route::post('/reset-password', [AuthController::class, 'resetPassword']);
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/me', [AuthController::class, 'me']);
+
+    // Métricas dinámicas del Dashboard
+    Route::get('/dashboard/metrics', [DashboardController::class, 'metrics']);
+
+    // CRUD de Usuarios
+    Route::get('/usuarios', [UsuarioController::class, 'index']);
+    Route::post('/usuarios', [UsuarioController::class, 'store']);
+    Route::put('/usuarios/{id}', [UsuarioController::class, 'update']);
+    Route::delete('/usuarios/{id}', [UsuarioController::class, 'destroy']);
+
+    // Catálogos para el formulario de Usuarios
+    Route::get('/roles', [UsuarioController::class, 'roles']);
+    Route::get('/organizaciones', [UsuarioController::class, 'organizaciones']);
+
+    // Casilleros (Etapa 1: monitoreo · Etapa 2: bloqueo · Etapa 3: asignación)
+    Route::get('/casilleros', [CasilleroController::class, 'index']);
+    Route::post('/casilleros/{id}/bloquear', [CasilleroController::class, 'bloquear']);
+    Route::post('/casilleros/{id}/desbloquear', [CasilleroController::class, 'desbloquear']);
+    Route::get('/casilleros/{id}/usuarios-asignables', [CasilleroController::class, 'usuariosAsignables']);
+    Route::get('/casilleros/{id}/asignacion', [CasilleroController::class, 'asignacion']);
+    Route::post('/casilleros/{id}/asignar', [CasilleroController::class, 'asignar']);
+    Route::post('/casilleros/{id}/liberar', [CasilleroController::class, 'liberar']);
 });

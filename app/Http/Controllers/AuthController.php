@@ -27,21 +27,17 @@ class AuthController extends Controller
     public function register(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            // Usuario
+            // Usuario (nombres del contrato de API)
             'nombre'        => 'required|string|max:100',
             'apellido_pa'   => 'required|string|max:100',
             'apellido_ma'   => 'nullable|string|max:100',
-            'email'         => 'required|string|email|max:150|unique:usuarios,email',
+            'email'         => 'required|string|email|max:150|unique:usuarios,correo',
             'password'      => 'required|string|min:8|confirmed',
-            'identificador' => 'nullable|string|max:100|unique:usuarios,identificador',
 
             // Organización
             'organizacion_nombre'        => 'required|string|max:150',
-            'organizacion_tipo'          => 'required|string|max:50',
-            'organizacion_direccion'     => 'nullable|string|max:225',
-            'organizacion_colonia'       => 'nullable|string|max:100',
-            'organizacion_ciudad'        => 'nullable|string|max:100',
-            'organizacion_codigo_postal' => 'nullable|string|max:10',
+            'organizacion_tipo'          => 'required|string|max:100',
+            'organizacion_direccion'     => 'nullable|string|max:255',
             'organizacion_telefono'      => 'nullable|string|max:20',
         ]);
 
@@ -52,27 +48,24 @@ class AuthController extends Controller
         DB::beginTransaction();
 
         try {
-            // 1. Crear organización
+            // 1. Crear organización (solo columnas reales de la tabla)
             $organizacion = Organizacion::create([
-                'nombre'        => $request->organizacion_nombre,
-                'tipo'          => $request->organizacion_tipo,
-                'direccion'     => $request->organizacion_direccion,
-                'colonia'       => $request->organizacion_colonia,
-                'ciudad'        => $request->organizacion_ciudad,
-                'codigo_postal' => $request->organizacion_codigo_postal,
-                'telefono'      => $request->organizacion_telefono,
-                'estado'        => 'A',
+                'nombre'    => $request->organizacion_nombre,
+                'tipo'      => $request->organizacion_tipo,
+                'direccion' => $request->organizacion_direccion,
+                'telefono'  => $request->organizacion_telefono,
+                'estado'    => true,
             ]);
 
-            // 2. Crear usuario
+            // 2. Crear usuario (mapeo contrato API -> columnas reales)
             $usuario = Usuario::create([
                 'nombre'            => $request->nombre,
-                'apellido_pa'       => $request->apellido_pa,
-                'apellido_ma'       => $request->apellido_ma,
-                'email'             => $request->email,
-                'password'          => Hash::make($request->password),
-                'identificador'     => $request->identificador,
-                'estado'            => 'P', // Pendiente
+                'apellido_paterno'  => $request->apellido_pa,
+                'apellido_materno'  => $request->apellido_ma,
+                'correo'            => $request->email,
+                'contrasena'        => Hash::make($request->password),
+                'identificador'     => Str::uuid()->toString(), // Generado en backend (NOT NULL UNIQUE)
+                'estado'            => false, // Pendiente de verificación
                 'organizaciones_id' => $organizacion->id,
                 'roles_id'          => Rol::ADMINISTRADOR, // = 2
             ]);
@@ -81,17 +74,16 @@ class AuthController extends Controller
             $codigo = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
 
             VerificacionCodigo::create([
-                'email'       => $usuario->email,
-                'codigo'      => $codigo,
-                'tipo'        => 'email_verification',
-                'expira_en'   => Carbon::now()->addMinutes(15),
-                'usado'       => 0,
-                'usuarios_id' => $usuario->id,
+                'usuarios_id'      => $usuario->id,
+                'codigo'           => $codigo,
+                'tipo'             => 'email_verification',
+                'fecha_expiracion' => Carbon::now()->addMinutes(15),
+                'utilizado'        => false,
             ]);
 
             // 4. Enviar correo
             try {
-                Mail::to($usuario->email)->send(
+                Mail::to($usuario->correo)->send(
                     new CodigoVerificacionMail($codigo, $usuario->nombre)
                 );
             } catch (\Exception $e) {
@@ -112,8 +104,7 @@ class AuthController extends Controller
             \Log::error('Error en registro: ' . $e->getMessage());
 
             return response()->json([
-                'message' => 'Error al registrar.',
-                'error'   => $e->getMessage(),
+                'message' => 'Error al registrar. Intenta de nuevo.',
             ], 500);
         }
     }
@@ -124,7 +115,7 @@ class AuthController extends Controller
     public function verify(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'email'  => 'required|email|exists:usuarios,email',
+            'email'  => 'required|email|exists:usuarios,correo',
             'codigo' => 'required|string|size:6',
         ]);
 
@@ -132,12 +123,17 @@ class AuthController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $registro = VerificacionCodigo::where('email', $request->email)
-            ->where('codigo', $request->codigo)
-            ->where('usado', 0)
-            ->where('expira_en', '>', Carbon::now())
-            ->latest('id')
-            ->first();
+        // Localizar al usuario por su correo (la relación del código es por usuarios_id)
+        $usuario = Usuario::where('correo', $request->email)->first();
+
+        $registro = $usuario
+            ? VerificacionCodigo::where('usuarios_id', $usuario->id)
+                ->where('codigo', $request->codigo)
+                ->where('utilizado', false)
+                ->where('fecha_expiracion', '>', Carbon::now())
+                ->latest('id')
+                ->first()
+            : null;
 
         if (!$registro) {
             return response()->json([
@@ -145,11 +141,11 @@ class AuthController extends Controller
             ], 400);
         }
 
-        // Marcar código como usado
-        $registro->update(['usado' => 1]);
+        // Marcar código como utilizado
+        $registro->update(['utilizado' => true]);
 
-        // Activar usuario
-        Usuario::where('email', $request->email)->update(['estado' => 'A']);
+        // Activar usuario (columna real: estado boolean)
+        $usuario->update(['estado' => true]);
 
         return response()->json([
             'message' => 'Cuenta verificada exitosamente.',
@@ -162,34 +158,33 @@ class AuthController extends Controller
     public function resendCode(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'email' => 'required|email|exists:usuarios,email',
+            'email' => 'required|email|exists:usuarios,correo',
         ]);
 
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $usuario = Usuario::where('email', $request->email)->first();
+        $usuario = Usuario::where('correo', $request->email)->first();
 
-        // Invalidar códigos anteriores no usados
-        VerificacionCodigo::where('email', $request->email)
-            ->where('usado', 0)
-            ->update(['usado' => 1]);
+        // Invalidar códigos anteriores no utilizados (por usuarios_id)
+        VerificacionCodigo::where('usuarios_id', $usuario->id)
+            ->where('utilizado', false)
+            ->update(['utilizado' => true]);
 
         // Generar nuevo código
         $codigo = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
 
         VerificacionCodigo::create([
-            'email'       => $usuario->email,
-            'codigo'      => $codigo,
-            'tipo'        => 'email_verification',
-            'expira_en'   => Carbon::now()->addMinutes(15),
-            'usado'       => 0,
-            'usuarios_id' => $usuario->id,
+            'usuarios_id'      => $usuario->id,
+            'codigo'           => $codigo,
+            'tipo'             => 'email_verification',
+            'fecha_expiracion' => Carbon::now()->addMinutes(15),
+            'utilizado'        => false,
         ]);
 
         try {
-            Mail::to($usuario->email)->send(
+            Mail::to($usuario->correo)->send(
                 new CodigoVerificacionMail($codigo, $usuario->nombre)
             );
         } catch (\Exception $e) {
@@ -209,31 +204,43 @@ class AuthController extends Controller
  */
 public function login(Request $request)
 {
+    // El login admite dos credenciales de identidad, sin romper el flujo
+    // existente por correo:
+    //  - `email`:          registro público (rol ADMINISTRADOR).
+    //  - `identificador`:  usuarios dados de alta por una organización
+    //                      (rol USUARIO), que pueden no tener correo.
+    // Debe enviarse exactamente una de las dos.
     $validator = Validator::make($request->all(), [
-        'email'    => 'required|email',
-        'password' => 'required|string',
+        'email'         => 'required_without:identificador|email',
+        'identificador' => 'required_without:email|string',
+        'password'      => 'required|string',
     ]);
 
     if ($validator->fails()) {
         return response()->json(['errors' => $validator->errors()], 422);
     }
 
-    // Buscar usuario
-    $usuario = Usuario::where('email', $request->email)->first();
+    // Buscar usuario por la credencial recibida (columnas reales: correo / identificador).
+    if ($request->filled('identificador')) {
+        $usuario = Usuario::where('identificador', $request->identificador)->first();
+    } else {
+        $usuario = Usuario::where('correo', $request->email)->first();
+    }
 
-    // Verificar credenciales
-    if (!$usuario || !Hash::check($request->password, $usuario->password)) {
+    // Verificar credenciales (columna real: contrasena)
+    if (!$usuario || !Hash::check($request->password, $usuario->contrasena)) {
         return response()->json([
             'message' => 'Credenciales incorrectas.',
         ], 401);
     }
 
-    // Verificar que esté activo (correo verificado)
-    if ($usuario->estado !== 'A') {
+    // Verificar que esté activo. En el registro público, estado=false hasta
+    // verificar el correo; los usuarios de organización se crean activos.
+    if ($usuario->estado !== true) {
         return response()->json([
             'message' => 'Tu cuenta no está verificada. Revisa tu correo.',
             'code'    => 'NOT_VERIFIED',
-            'email'   => $usuario->email,
+            'email'   => $usuario->correo,
         ], 403);
     }
 
@@ -249,9 +256,9 @@ public function login(Request $request)
         'user'    => [
             'id'              => $usuario->id,
             'nombre'          => $usuario->nombre,
-            'apellido_pa'     => $usuario->apellido_pa,
-            'apellido_ma'     => $usuario->apellido_ma,
-            'email'           => $usuario->email,
+            'apellido_pa'     => $usuario->apellido_paterno,
+            'apellido_ma'     => $usuario->apellido_materno,
+            'email'           => $usuario->correo,
             'identificador'   => $usuario->identificador,
             'estado'          => $usuario->estado,
             'rol'             => $usuario->rol->nombre,        // "Superadmin", "Administrador", "Usuario"
@@ -285,9 +292,9 @@ public function me(Request $request)
         'user' => [
             'id'            => $usuario->id,
             'nombre'        => $usuario->nombre,
-            'apellido_pa'   => $usuario->apellido_pa,
-            'apellido_ma'   => $usuario->apellido_ma,
-            'email'         => $usuario->email,
+            'apellido_pa'   => $usuario->apellido_paterno,
+            'apellido_ma'   => $usuario->apellido_materno,
+            'email'         => $usuario->correo,
             'identificador' => $usuario->identificador,
             'rol'           => $usuario->rol->nombre,
             'rol_id'        => $usuario->rol->id,
@@ -302,7 +309,7 @@ public function me(Request $request)
 public function forgotPassword(Request $request)
 {
     $validator = Validator::make($request->all(), [
-        'email' => 'required|email|exists:usuarios,email',
+        'email' => 'required|email|exists:usuarios,correo',
     ], [
         'email.exists' => 'No encontramos una cuenta con ese correo.',
     ]);
@@ -311,7 +318,7 @@ public function forgotPassword(Request $request)
         return response()->json(['errors' => $validator->errors()], 422);
     }
 
-    $usuario = Usuario::where('email', $request->email)->first();
+    $usuario = Usuario::where('correo', $request->email)->first();
 
     // Invalidar tokens anteriores no usados
     RecuperarContrasena::where('email', $request->email)
@@ -322,7 +329,7 @@ public function forgotPassword(Request $request)
     $token = Str::random(64);
 
     RecuperarContrasena::create([
-        'email'       => $usuario->email,
+        'email'       => $usuario->correo,
         'codigo'      => $token, // reutilizamos la columna 'codigo' para el token
         'expira_en'   => Carbon::now()->addMinutes(30), // 30 min para enlaces mágicos
         'usado'       => 0,
@@ -333,11 +340,11 @@ public function forgotPassword(Request $request)
     $frontendUrl = config('app.frontend_url', 'http://localhost:5173');
     $enlace = $frontendUrl . '/recuperar?' . http_build_query([
         'token' => $token,
-        'email' => $usuario->email,
+        'email' => $usuario->correo,
     ]);
 
     try {
-        Mail::to($usuario->email)->send(
+        Mail::to($usuario->correo)->send(
             new RecuperarContrasenaMail($enlace, $usuario->nombre)
         );
     } catch (\Exception $e) {
@@ -358,7 +365,7 @@ public function forgotPassword(Request $request)
 public function resetPassword(Request $request)
 {
     $validator = Validator::make($request->all(), [
-        'email'    => 'required|email|exists:usuarios,email',
+        'email'    => 'required|email|exists:usuarios,correo',
         'token'    => 'required|string',
         'password' => 'required|string|min:8|confirmed',
     ], [
@@ -384,10 +391,10 @@ public function resetPassword(Request $request)
         ], 400);
     }
 
-    // Actualizar contraseña
-    $usuario = Usuario::where('email', $request->email)->first();
+    // Actualizar contraseña (columnas reales: correo / contrasena)
+    $usuario = Usuario::where('correo', $request->email)->first();
     $usuario->update([
-        'password' => Hash::make($request->password),
+        'contrasena' => Hash::make($request->password),
     ]);
 
     // Marcar token como usado

@@ -15,18 +15,20 @@ class Usuario extends Authenticatable
     protected $fillable = [
         'identificador',
         'nombre',
-        'apellido_pa',
-        'apellido_ma',
-        'email',
-        'password',
+        'apellido_paterno',
+        'apellido_materno',
+        'correo',
+        'contrasena',
+        'telefono',
         'estado',
         'organizaciones_id',
         'roles_id',
     ];
 
-    protected $hidden = ['password'];
+    protected $hidden = ['contrasena'];
 
     protected $casts = [
+        'estado'     => 'boolean',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];

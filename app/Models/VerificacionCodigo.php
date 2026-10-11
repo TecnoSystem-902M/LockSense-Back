@@ -10,15 +10,15 @@ class VerificacionCodigo extends Model
     public $timestamps = false; // Tu tabla no tiene created_at/updated_at
 
     protected $fillable = [
-        'email',
+        'usuarios_id',
         'codigo',
         'tipo',
-        'expira_en',
-        'usado',
-        'usuarios_id',
+        'fecha_expiracion',
+        'utilizado',
     ];
 
     protected $casts = [
-        'expira_en' => 'datetime',
+        'fecha_expiracion' => 'datetime',
+        'utilizado'        => 'boolean',
     ];
 }
