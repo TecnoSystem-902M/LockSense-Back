@@ -20,18 +20,18 @@ class UsuarioCrud extends Model
         'roles_id',
         'identificador',
         'nombre',
-        'apellido_paterno',
-        'apellido_materno',
-        'correo',
-        'contrasena',
+        'apellido_pa',
+        'apellido_ma',
+        'email',
+        'password',
         'telefono',
         'estado',
     ];
 
-    protected $hidden = ['contrasena'];
+    protected $hidden = ['password'];
 
     protected $casts = [
-        'estado'     => 'boolean',
+        'estado' => 'boolean',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];

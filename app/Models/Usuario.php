@@ -4,31 +4,30 @@ namespace App\Models;
 
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
-use Laravel\Sanctum\HasApiTokens;   
+use Laravel\Sanctum\HasApiTokens;
 
 class Usuario extends Authenticatable
 {
-    use HasApiTokens, Notifiable;   
+    use HasApiTokens, Notifiable;
 
     protected $table = 'usuarios';
 
     protected $fillable = [
         'identificador',
         'nombre',
-        'apellido_paterno',
-        'apellido_materno',
-        'correo',
-        'contrasena',
+        'apellido_pa',
+        'apellido_ma',
+        'email',
+        'password',
         'telefono',
         'estado',
         'organizaciones_id',
         'roles_id',
     ];
 
-    protected $hidden = ['contrasena'];
+    protected $hidden = ['password'];
 
     protected $casts = [
-        'estado'     => 'boolean',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];

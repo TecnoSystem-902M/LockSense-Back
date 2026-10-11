@@ -10,14 +10,13 @@ class CredencialRfid extends Model
 
     protected $fillable = [
         'usuarios_id',
-        'uid',
+        'codigo',
         'tipo',
         'estado',
         'fecha_registro',
     ];
 
     protected $casts = [
-        'estado'         => 'boolean',
         'fecha_registro' => 'datetime',
     ];
 

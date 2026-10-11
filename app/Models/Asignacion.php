@@ -19,7 +19,8 @@ class Asignacion extends Model
     protected $casts = [
         'fecha_asignacion' => 'datetime',
         'fecha_liberacion' => 'datetime',
-        'estado'           => 'boolean',
+        // ❌ NO castear 'estado' a boolean.
+        // La columna es character(1): 'A' = activa, 'I' = inactiva.
     ];
 
     // La tabla asignaciones no tiene created_at/updated_at en el esquema real.

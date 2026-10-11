@@ -3,11 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\Asignacion;
+use App\Models\Bloqueo;
 use App\Models\Casillero;
 use App\Models\CredencialRfid;
 use App\Models\EventoCasillero;
 use App\Models\Rol;
-use App\Models\UsuarioCrud;
+use App\Models\Usuario;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
@@ -24,10 +25,6 @@ class CasilleroController extends Controller
         return $user && (int) $user->roles_id === Rol::ADMINISTRADOR;
     }
 
-    /**
-     * Solo SUPERADMIN o ADMINISTRADOR pueden operar el módulo de casilleros.
-     * Devuelve una respuesta 403 si no está autorizado, o null si lo está.
-     */
     private function denegarSiNoEsAdministrativo($user)
     {
         if (!$this->esSuperadmin($user) && !$this->esAdministrador($user)) {
@@ -36,13 +33,6 @@ class CasilleroController extends Controller
         return null;
     }
 
-    /**
-     * Localiza un casillero respetando el alcance del usuario autenticado.
-     * - SUPERADMIN: cualquier casillero.
-     * - ADMINISTRADOR: solo los de SU organización (derivada del token).
-     * Si no existe o está fuera de alcance, devuelve null (el llamador
-     * responde 404 sin revelar la existencia a otra organización).
-     */
     private function buscarCasilleroEnAmbito($user, $id): ?Casillero
     {
         $query = Casillero::query()->whereKey($id);
@@ -55,45 +45,52 @@ class CasilleroController extends Controller
     }
 
     /**
-     * Serializa un casillero exponiendo la ocupación, el bloqueo y su motivo
-     * por separado. Nunca incluye datos sensibles del usuario.
-     *
-     * @param array<int,string> $uidsPorUsuario  mapa usuarios_id => uid
+     * Recalcula y guarda `casilleros.estado` según las relaciones.
+     * Prioridad: Bloqueado > Ocupado > Libre.
      */
+    private function sincronizarEstado(Casillero $casillero): void
+    {
+        if ($casillero->estaBloqueado()) {
+            $casillero->estado = 'Bloqueado';
+        } elseif ($casillero->estaOcupado()) {
+            $casillero->estado = 'Ocupado';
+        } else {
+            $casillero->estado = 'Libre';
+        }
+        $casillero->save();
+    }
+
     private function serializar(Casillero $c, array $uidsPorUsuario = []): array
     {
         $asignacion = $c->asignacionActiva;
         $usuario = $asignacion?->usuario;
+        $bloqueo = $c->bloqueoActivo;
 
         $usuarioData = null;
         if ($usuario) {
             $usuarioData = [
-                'id'               => $usuario->id,
-                'nombre'           => $usuario->nombre,
-                'apellido_paterno' => $usuario->apellido_paterno,
-                'apellido_materno' => $usuario->apellido_materno,
-                'nombre_completo'  => trim(implode(' ', array_filter([
+                'id'              => $usuario->id,
+                'nombre'          => $usuario->nombre,
+                'apellido_pa'     => $usuario->apellido_pa,
+                'apellido_ma'     => $usuario->apellido_ma,
+                'nombre_completo' => trim(implode(' ', array_filter([
                     $usuario->nombre,
-                    $usuario->apellido_paterno,
-                    $usuario->apellido_materno,
+                    $usuario->apellido_pa,
+                    $usuario->apellido_ma,
                 ]))),
-                'correo'           => $usuario->correo,
+                'email'           => $usuario->email,
             ];
         }
 
         return [
             'id'                => $c->id,
             'numero'            => $c->numero,
-            // `estado` legado (varchar de presentación) se conserva por
-            // compatibilidad, pero la ocupación real es el booleano `ocupado`.
             'estado'            => $c->estado,
             'ubicacion'         => $c->ubicacion,
             'organizaciones_id' => $c->organizaciones_id,
-            // Ocupación derivada EXCLUSIVAMENTE de la asignación activa.
             'ocupado'           => $asignacion !== null,
-            // Bloqueo como atributo independiente del casillero.
-            'bloqueado'         => (bool) $c->bloqueado,
-            'motivo_bloqueo'    => $c->motivo_bloqueo,
+            'bloqueado'         => $bloqueo !== null,
+            'motivo_bloqueo'    => $bloqueo?->tipo,
             'asignacion'        => $asignacion ? [
                 'id'               => $asignacion->id,
                 'fecha_asignacion' => $asignacion->fecha_asignacion,
@@ -103,12 +100,6 @@ class CasilleroController extends Controller
         ];
     }
 
-    /**
-     * Listado de casilleros para el monitoreo.
-     * - SUPERADMIN: casilleros de todas las organizaciones.
-     * - ADMINISTRADOR: solo los de su propia organización (derivada del token).
-     * - USUARIO (u otro): 403.
-     */
     public function index(Request $request)
     {
         $user = $request->user();
@@ -117,20 +108,16 @@ class CasilleroController extends Controller
             return $deny;
         }
 
-        // Eager loading para evitar N+1: asignación activa + su usuario.
         $query = Casillero::query()
-            ->with(['asignacionActiva.usuario'])
+            ->with(['asignacionActiva.usuario', 'bloqueoActivo'])
             ->orderBy('id');
 
         if (!$this->esSuperadmin($user)) {
-            // El alcance del administrador se obtiene del usuario autenticado,
-            // nunca de un parámetro enviado por el cliente.
             $query->where('organizaciones_id', $user->organizaciones_id);
         }
 
         $casilleros = $query->get();
 
-        // Pre-cargar los UID RFID de los usuarios asignados en una sola consulta.
         $usuariosIds = $casilleros
             ->map(fn ($c) => optional($c->asignacionActiva)->usuarios_id)
             ->filter()
@@ -139,10 +126,10 @@ class CasilleroController extends Controller
 
         $uidsPorUsuario = CredencialRfid::query()
             ->whereIn('usuarios_id', $usuariosIds)
-            ->where('estado', true)
-            ->get(['usuarios_id', 'uid'])
+            ->where('estado', 'A')
+            ->get(['usuarios_id', 'codigo'])
             ->groupBy('usuarios_id')
-            ->map(fn ($grupo) => $grupo->first()->uid)
+            ->map(fn ($grupo) => $grupo->first()->codigo)
             ->all();
 
         $data = $casilleros->map(fn (Casillero $c) => $this->serializar($c, $uidsPorUsuario));
@@ -150,15 +137,6 @@ class CasilleroController extends Controller
         return response()->json($data);
     }
 
-    /**
-     * Bloquea un casillero.
-     * Reglas:
-     *  - Solo SUPERADMIN/ADMINISTRADOR; el admin solo en su organización.
-     *  - motivo_bloqueo ∈ { ADMINISTRATIVO, MANTENIMIENTO }.
-     *  - ADMINISTRATIVO requiere asignación activa; MANTENIMIENTO no.
-     *  - No modifica `asignaciones` ni `credenciales_rfid`.
-     *  - Registra un evento en `eventos_casillero`.
-     */
     public function bloquear(Request $request, $id)
     {
         $user = $request->user();
@@ -180,9 +158,14 @@ class CasilleroController extends Controller
             return response()->json(['message' => 'Casillero no encontrado.'], 404);
         }
 
+        if ($casillero->estaBloqueado()) {
+            return response()->json([
+                'message' => 'El casillero ya está bloqueado.',
+            ], 409);
+        }
+
         $motivo = $request->input('motivo_bloqueo');
 
-        // Regla 8: no se permite bloqueo ADMINISTRATIVO sin asignación activa.
         if ($motivo === Casillero::MOTIVO_ADMINISTRATIVO && !$casillero->estaOcupado()) {
             return response()->json([
                 'message' => 'No se puede aplicar un bloqueo administrativo a un casillero sin asignación activa.',
@@ -190,11 +173,15 @@ class CasilleroController extends Controller
         }
 
         DB::transaction(function () use ($casillero, $motivo) {
-            $casillero->bloqueado = true;
-            $casillero->motivo_bloqueo = $motivo;
-            $casillero->save();
+            Bloqueo::query()->create([
+                'casilleros_id' => $casillero->id,
+                'tipo'          => $motivo,
+                'motivo'        => 'Bloqueo '.$motivo,
+                'inicio'        => now(),
+                'fin'           => null,
+                'activo'        => 'A',
+            ]);
 
-            // Registrar evento (no toca asignaciones ni credenciales).
             EventoCasillero::query()->create([
                 'casilleros_id' => $casillero->id,
                 'tipo_evento'   => 'BLOQUEO',
@@ -203,8 +190,8 @@ class CasilleroController extends Controller
             ]);
         });
 
-        // Releer con la asignación activa para serializar la ocupación real.
-        $casillero->load('asignacionActiva.usuario');
+        $casillero->load(['asignacionActiva.usuario', 'bloqueoActivo']);
+        $this->sincronizarEstado($casillero);   // 👈 actualiza estado
 
         return response()->json([
             'message'   => 'Casillero bloqueado correctamente.',
@@ -212,15 +199,6 @@ class CasilleroController extends Controller
         ]);
     }
 
-    /**
-     * Desbloquea un casillero.
-     * Reglas:
-     *  - Solo SUPERADMIN/ADMINISTRADOR; el admin solo en su organización.
-     *  - Establece bloqueado = false y motivo_bloqueo = null.
-     *  - No modifica `asignaciones` ni `credenciales_rfid`; la ocupación se
-     *    recalcula desde la asignación activa.
-     *  - Registra un evento en `eventos_casillero`.
-     */
     public function desbloquear(Request $request, $id)
     {
         $user = $request->user();
@@ -234,10 +212,17 @@ class CasilleroController extends Controller
             return response()->json(['message' => 'Casillero no encontrado.'], 404);
         }
 
-        DB::transaction(function () use ($casillero) {
-            $casillero->bloqueado = false;
-            $casillero->motivo_bloqueo = null;
-            $casillero->save();
+        $bloqueoActivo = $casillero->bloqueoActivo;
+        if (!$bloqueoActivo) {
+            return response()->json([
+                'message' => 'El casillero no está bloqueado.',
+            ], 409);
+        }
+
+        DB::transaction(function () use ($casillero, $bloqueoActivo) {
+            $bloqueoActivo->activo = 'I';
+            $bloqueoActivo->fin = now();
+            $bloqueoActivo->save();
 
             EventoCasillero::query()->create([
                 'casilleros_id' => $casillero->id,
@@ -247,7 +232,8 @@ class CasilleroController extends Controller
             ]);
         });
 
-        $casillero->load('asignacionActiva.usuario');
+        $casillero->load(['asignacionActiva.usuario', 'bloqueoActivo']);
+        $this->sincronizarEstado($casillero);   // 👈 actualiza estado
 
         return response()->json([
             'message'   => 'Casillero desbloqueado correctamente.',
@@ -255,16 +241,6 @@ class CasilleroController extends Controller
         ]);
     }
 
-    /**
-     * Usuarios ELEGIBLES para asignarse a un casillero.
-     * Reglas:
-     *  - Solo SUPERADMIN/ADMINISTRADOR (si no, 403).
-     *  - El casillero debe existir y estar en el ámbito del usuario (si no, 404).
-     *  - Candidatos: cuentas con rol USUARIO, activas (estado = true), de la
-     *    MISMA organización del casillero.
-     *  - Se excluye al propio usuario autenticado (no puede asignarse a sí mismo)
-     *    y, por el filtro de rol, cualquier cuenta ADMINISTRADOR/SUPERADMIN.
-     */
     public function usuariosAsignables(Request $request, $id)
     {
         $user = $request->user();
@@ -278,30 +254,17 @@ class CasilleroController extends Controller
             return response()->json(['message' => 'Casillero no encontrado.'], 404);
         }
 
-        $candidatos = UsuarioCrud::query()
-            ->where('estado', true)
+        $candidatos = Usuario::query()
+            ->where('estado', 'A')
             ->where('roles_id', Rol::USUARIO)
             ->where('organizaciones_id', $casillero->organizaciones_id)
-            ->where('id', '!=', $user->id) // no asignarse a sí mismo
+            ->where('id', '!=', $user->id)
             ->orderBy('id')
-            ->get(['id', 'nombre', 'apellido_paterno', 'apellido_materno', 'correo']);
+            ->get(['id', 'nombre', 'apellido_pa', 'apellido_ma', 'email']);
 
         return response()->json($candidatos);
     }
 
-    /**
-     * Asigna un casillero a un usuario.
-     * Reglas (todas verificadas en servidor):
-     *  - Solo SUPERADMIN/ADMINISTRADOR; el admin solo en su organización.
-     *  - El casillero no puede estar bloqueado.
-     *  - El casillero no puede tener una asignación activa.
-     *  - El usuario objetivo: rol USUARIO, activo, de la MISMA organización del
-     *    casillero, y distinto del autenticado.
-     *  - Transacción con bloqueo de fila (lockForUpdate) para evitar carreras.
-     *  - Crea la fila en `asignaciones` (estado = true, fecha_asignacion = now).
-     *  - Registra un evento ASIGNACION.
-     *  - NO toca credenciales_rfid.
-     */
     public function asignar(Request $request, $id)
     {
         $user = $request->user();
@@ -312,7 +275,9 @@ class CasilleroController extends Controller
 
         $validator = Validator::make($request->all(), [
             'usuarios_id' => ['required', 'integer'],
+            'uid_rfid'    => ['nullable', 'string', 'max:50'],
         ]);
+        
 
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
@@ -323,7 +288,7 @@ class CasilleroController extends Controller
             return response()->json(['message' => 'Casillero no encontrado.'], 404);
         }
 
-        if ($casillero->bloqueado) {
+        if ($casillero->estaBloqueado()) {
             return response()->json([
                 'message' => 'No se puede asignar un casillero bloqueado.',
             ], 422);
@@ -331,11 +296,9 @@ class CasilleroController extends Controller
 
         $usuarioId = (int) $request->input('usuarios_id');
 
-        // El usuario objetivo debe ser USUARIO activo de la MISMA organización
-        // del casillero, y no puede ser el propio autenticado.
-        $objetivo = UsuarioCrud::query()
+        $objetivo = Usuario::query()
             ->where('id', $usuarioId)
-            ->where('estado', true)
+            ->where('estado', 'A')
             ->where('roles_id', Rol::USUARIO)
             ->where('organizaciones_id', $casillero->organizaciones_id)
             ->first();
@@ -346,25 +309,35 @@ class CasilleroController extends Controller
             ], 422);
         }
 
+        $uid = null;
+        if ($request->filled('uid_rfid')) {
+            $uid = strtoupper(str_replace([':', ' ', '-'], '', $request->uid_rfid));
+
+            $existente = CredencialRfid::where('codigo', $uid)
+                ->where('usuarios_id', '!=', $objetivo->id)
+                ->first();
+
+            if ($existente) {
+                return response()->json([
+                    'message' => 'Esa tarjeta RFID ya está registrada en otro usuario.',
+                ], 409);
+            }
+        }
+
         try {
-            DB::transaction(function () use ($casillero, $objetivo) {
-                // Bloqueo de fila del casillero para serializar asignaciones
-                // concurrentes sobre el mismo casillero.
+            DB::transaction(function () use ($casillero, $objetivo, $uid) {
                 $casilleroBloqueado = Casillero::query()
                     ->whereKey($casillero->id)
                     ->lockForUpdate()
                     ->first();
 
-                // Revalidar la ocupación DENTRO de la transacción (otra solicitud
-                // pudo haber asignado el casillero justo antes).
                 $yaAsignado = Asignacion::query()
                     ->where('casilleros_id', $casilleroBloqueado->id)
-                    ->where('estado', true)
+                    ->where('estado', 'A')
                     ->lockForUpdate()
                     ->exists();
 
                 if ($yaAsignado) {
-                    // Abortar con un marcador para traducir a 409 fuera.
                     throw new \RuntimeException('CASILLERO_OCUPADO');
                 }
 
@@ -373,8 +346,20 @@ class CasilleroController extends Controller
                     'casilleros_id'    => $casilleroBloqueado->id,
                     'fecha_asignacion' => now(),
                     'fecha_liberacion' => null,
-                    'estado'           => true,
+                    'estado'           => 'A',
                 ]);
+
+                if ($uid) {
+                    CredencialRfid::updateOrCreate(
+                        ['usuarios_id' => $objetivo->id],
+                        [
+                            'codigo'         => $uid,
+                            'tipo'           => 'MIFARE',
+                            'estado'         => 'A',
+                            'fecha_registro' => now(),
+                        ]
+                    );
+                }
 
                 EventoCasillero::query()->create([
                     'casilleros_id' => $casilleroBloqueado->id,
@@ -392,7 +377,8 @@ class CasilleroController extends Controller
             throw $e;
         }
 
-        $casillero->load('asignacionActiva.usuario');
+        $casillero->load(['asignacionActiva.usuario', 'bloqueoActivo']);
+        $this->sincronizarEstado($casillero);   // 👈 actualiza estado
 
         return response()->json([
             'message'   => 'Casillero asignado correctamente.',
@@ -400,12 +386,6 @@ class CasilleroController extends Controller
         ], 201);
     }
 
-    /**
-     * Consulta de la asignación activa de un casillero (botón "Ver usuario").
-     * - Solo SUPERADMIN/ADMINISTRADOR; el admin solo en su organización.
-     * - Devuelve datos del usuario, del casillero, el UID RFID real (o null)
-     *   y los estados de ocupación/bloqueo. No expone datos sensibles.
-     */
     public function asignacion(Request $request, $id)
     {
         $user = $request->user();
@@ -419,7 +399,7 @@ class CasilleroController extends Controller
             return response()->json(['message' => 'Casillero no encontrado.'], 404);
         }
 
-        $casillero->load('asignacionActiva.usuario');
+        $casillero->load(['asignacionActiva.usuario', 'bloqueoActivo']);
 
         if (!$casillero->asignacionActiva) {
             return response()->json([
@@ -430,15 +410,6 @@ class CasilleroController extends Controller
         return response()->json($this->serializar($casillero, $this->uidsDe($casillero)));
     }
 
-    /**
-     * Libera (baja lógica) la asignación activa de un casillero.
-     * - Solo SUPERADMIN/ADMINISTRADOR; el admin solo en su organización.
-     * - Cierra la asignación: estado = false, fecha_liberacion = now().
-     * - NO borra la cuenta del usuario, NI el historial, NI la credencial RFID.
-     * - NO altera el bloqueo (bloqueado/motivo_bloqueo permanecen).
-     * - Si no hay asignación activa, responde 409.
-     * - Registra un evento LIBERACION.
-     */
     public function liberar(Request $request, $id)
     {
         $user = $request->user();
@@ -456,7 +427,7 @@ class CasilleroController extends Controller
             DB::transaction(function () use ($casillero) {
                 $activa = Asignacion::query()
                     ->where('casilleros_id', $casillero->id)
-                    ->where('estado', true)
+                    ->where('estado', 'A')
                     ->lockForUpdate()
                     ->first();
 
@@ -464,8 +435,7 @@ class CasilleroController extends Controller
                     throw new \RuntimeException('SIN_ASIGNACION_ACTIVA');
                 }
 
-                // Baja lógica: se conserva el registro histórico.
-                $activa->estado = false;
+                $activa->estado = 'I';
                 $activa->fecha_liberacion = now();
                 $activa->save();
 
@@ -485,9 +455,8 @@ class CasilleroController extends Controller
             throw $e;
         }
 
-        // Releer sin asignación activa: la ocupación debe recalcularse a libre,
-        // pero el bloqueo (si lo hubiera) se mantiene intacto.
-        $casillero->load('asignacionActiva.usuario');
+        $casillero->load(['asignacionActiva.usuario', 'bloqueoActivo']);
+        $this->sincronizarEstado($casillero);   // 👈 actualiza estado
 
         return response()->json([
             'message'   => 'Casillero liberado correctamente.',
@@ -495,9 +464,6 @@ class CasilleroController extends Controller
         ]);
     }
 
-    /**
-     * Mapa usuarios_id => uid para el usuario asignado de un solo casillero.
-     */
     private function uidsDe(Casillero $casillero): array
     {
         $usuarioId = optional($casillero->asignacionActiva)->usuarios_id;
@@ -507,10 +473,10 @@ class CasilleroController extends Controller
 
         return CredencialRfid::query()
             ->where('usuarios_id', $usuarioId)
-            ->where('estado', true)
-            ->get(['usuarios_id', 'uid'])
+            ->where('estado', 'A')
+            ->get(['usuarios_id', 'codigo'])
             ->groupBy('usuarios_id')
-            ->map(fn ($grupo) => $grupo->first()->uid)
+            ->map(fn ($grupo) => $grupo->first()->codigo)
             ->all();
     }
 }

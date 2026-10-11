@@ -8,7 +8,6 @@ class Casillero extends Model
 {
     protected $table = 'casilleros';
 
-    // Motivos de bloqueo permitidos (Etapa 2).
     const MOTIVO_ADMINISTRATIVO = 'ADMINISTRATIVO';
     const MOTIVO_MANTENIMIENTO  = 'MANTENIMIENTO';
 
@@ -22,12 +21,9 @@ class Casillero extends Model
         'numero',
         'estado',
         'ubicacion',
-        'bloqueado',
-        'motivo_bloqueo',
     ];
 
     protected $casts = [
-        'bloqueado'  => 'boolean',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
@@ -42,14 +38,26 @@ class Casillero extends Model
         return $this->hasMany(Asignacion::class, 'casilleros_id');
     }
 
-    /**
-     * Asignación activa del casillero (estado = true), si existe.
-     */
     public function asignacionActiva()
     {
         return $this->hasOne(Asignacion::class, 'casilleros_id')
-            ->where('estado', true)
+            ->where('estado', 'A')
             ->latest('id');
+    }
+
+    /**
+     * Bloqueo activo del casillero (activo = 'A'), si existe.
+     */
+    public function bloqueoActivo()
+    {
+        return $this->hasOne(Bloqueo::class, 'casilleros_id')
+            ->where('activo', 'A')
+            ->latest('id');
+    }
+
+    public function bloqueos()
+    {
+        return $this->hasMany(Bloqueo::class, 'casilleros_id');
     }
 
     public function eventos()
@@ -57,13 +65,13 @@ class Casillero extends Model
         return $this->hasMany(EventoCasillero::class, 'casilleros_id');
     }
 
-    /**
-     * Ocupación derivada: el casillero está ocupado si tiene una asignación
-     * activa (estado = true). No depende del bloqueo ni del campo `estado`.
-     * Nota: requiere que `asignacionActiva` esté cargada o accesible.
-     */
     public function estaOcupado(): bool
     {
         return $this->asignacionActiva()->exists();
+    }
+
+    public function estaBloqueado(): bool
+    {
+        return $this->bloqueoActivo()->exists();
     }
 }

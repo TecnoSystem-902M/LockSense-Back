@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\UsuarioCrud;
+use App\Models\Usuario;
 use App\Models\Organizacion;
 use App\Models\Rol;
 use Illuminate\Http\Request;
@@ -13,15 +13,15 @@ use Illuminate\Validation\Rule;
 class UsuarioController extends Controller
 {
     /**
-     * Campos que se exponen al frontend (nunca `contrasena`).
+     * Campos que se exponen al frontend (nunca `password`).
      */
     private array $camposPublicos = [
         'id',
         'nombre',
-        'apellido_paterno',
-        'apellido_materno',
+        'apellido_pa',
+        'apellido_ma',
         'identificador',
-        'correo',
+        'email',
         'telefono',
         'organizaciones_id',
         'roles_id',
@@ -29,8 +29,7 @@ class UsuarioController extends Controller
     ];
 
     // ----------------------------------------------------------------
-    // Helpers de autorización basados en la identidad autenticada.
-    // No se confía en el rol/organización enviados por el cliente.
+    // Helpers de autorización
     // ----------------------------------------------------------------
 
     private function esSuperadmin($user): bool
@@ -43,10 +42,6 @@ class UsuarioController extends Controller
         return $user && (int) $user->roles_id === Rol::ADMINISTRADOR;
     }
 
-    /**
-     * Solo SUPERADMIN o ADMINISTRADOR pueden operar el módulo de usuarios.
-     * Devuelve una respuesta 403 si no está autorizado, o null si lo está.
-     */
     private function denegarSiNoEsAdministrativo($user)
     {
         if (!$this->esSuperadmin($user) && !$this->esAdministrador($user)) {
@@ -55,28 +50,16 @@ class UsuarioController extends Controller
         return null;
     }
 
-    /**
-     * Verifica que un ADMINISTRADOR pueda operar sobre el usuario objetivo.
-     * Orden de comprobaciones (para no filtrar información):
-     *  1. Si el objetivo es de otra organización -> 404 (no se revela existencia).
-     *  2. Si el objetivo es una cuenta privilegiada (ADMINISTRADOR/SUPERADMIN)
-     *     dentro de la misma organización -> 403 (operación prohibida).
-     * El SUPERADMIN no tiene estas restricciones.
-     *
-     * Devuelve una respuesta de error o null si la operación está permitida.
-     */
-    private function denegarObjetivoFueraDeAmbito($user, UsuarioCrud $objetivo)
+    private function denegarObjetivoFueraDeAmbito($user, Usuario $objetivo)
     {
         if ($this->esSuperadmin($user)) {
             return null;
         }
 
-        // 1. Aislamiento por organización (404 para no revelar existencia).
         if ((int) $objetivo->organizaciones_id !== (int) $user->organizaciones_id) {
             return response()->json(['message' => 'Usuario no encontrado.'], 404);
         }
 
-        // 2. No puede operar sobre cuentas privilegiadas de su misma organización.
         if ((int) $objetivo->roles_id !== Rol::USUARIO) {
             return response()->json(['message' => 'No autorizado.'], 403);
         }
@@ -85,9 +68,7 @@ class UsuarioController extends Controller
     }
 
     /**
-     * Listado de usuarios activos (estado = true).
-     * - SUPERADMIN: ve todas las organizaciones y todos los roles.
-     * - ADMINISTRADOR: solo cuentas USUARIO de su propia organización.
+     * Listado de usuarios activos (estado = 'A')
      */
     public function index(Request $request)
     {
@@ -96,11 +77,9 @@ class UsuarioController extends Controller
             return $deny;
         }
 
-        $query = UsuarioCrud::query()->where('estado', true);
+        $query = Usuario::query()->where('estado', 'A');
 
         if (!$this->esSuperadmin($user)) {
-            // Administrador: su organización y solo cuentas USUARIO
-            // (no gestiona ni ve cuentas privilegiadas ADMINISTRADOR/SUPERADMIN).
             $query->where('organizaciones_id', $user->organizaciones_id)
                   ->where('roles_id', Rol::USUARIO);
         }
@@ -112,9 +91,8 @@ class UsuarioController extends Controller
 
     /**
      * Alta de usuario.
-     * - El rol y la organización se asignan EN EL SERVIDOR, no desde el cliente.
-     * - ADMINISTRADOR: siempre crea en su propia organización con rol USUARIO.
-     * - SUPERADMIN: puede indicar organización y rol permitidos.
+     * El identificador es un string libre (matrícula, número de empleado, etc.)
+     * único DENTRO de la organización.
      */
     public function store(Request $request)
     {
@@ -123,36 +101,7 @@ class UsuarioController extends Controller
             return $deny;
         }
 
-        $reglas = [
-            'nombre'           => 'required|string|max:100',
-            'apellido_paterno' => 'required|string|max:100',
-            'apellido_materno' => 'nullable|string|max:100',
-            'identificador'    => 'required|uuid|max:100|unique:usuarios,identificador',
-            // El correo es OPCIONAL para los usuarios de organización. Si se
-            // envía, debe ser válido y único; si se omite se guarda como NULL.
-            'correo'           => 'nullable|email|max:150|unique:usuarios,correo',
-            'contrasena'       => 'required|string|min:8',
-            'telefono'         => 'nullable|string|max:20',
-            'estado'           => 'boolean',
-        ];
-
-        // El superadmin PUEDE (opcionalmente) especificar organización y rol.
-        // Si no los envía (p. ej. desde el formulario de organización), se usa
-        // un valor por defecto seguro resuelto en el servidor.
-        if ($this->esSuperadmin($user)) {
-            $reglas['organizaciones_id'] = 'nullable|integer|exists:organizaciones,id';
-            $reglas['roles_id']          = 'nullable|integer|exists:roles,id';
-        }
-
-        $validator = Validator::make($request->all(), $reglas);
-
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
-
-        // Resolver rol y organización SIEMPRE desde el servidor. Nunca se
-        // confía en el frontend para un ADMINISTRADOR; el SUPERADMIN puede
-        // indicarlos de forma opcional (con fallback a su propio ámbito).
+        // 1. Resolver organización y rol ANTES de validar (para la regla unique)
         if ($this->esSuperadmin($user)) {
             $organizacionId = $request->filled('organizaciones_id')
                 ? (int) $request->organizaciones_id
@@ -161,72 +110,26 @@ class UsuarioController extends Controller
                 ? (int) $request->roles_id
                 : Rol::USUARIO;
         } else {
-            // Administrador: su propia organización y rol USUARIO forzado.
             $organizacionId = (int) $user->organizaciones_id;
             $rolId          = Rol::USUARIO;
         }
 
-        $usuario = new UsuarioCrud();
-        $usuario->nombre            = $request->nombre;
-        $usuario->apellido_paterno  = $request->apellido_paterno;
-        $usuario->apellido_materno  = $request->apellido_materno;
-        $usuario->identificador     = $request->identificador;
-        // Correo opcional: vacío o ausente se persiste como NULL.
-        $usuario->correo            = $request->filled('correo') ? $request->correo : null;
-        $usuario->contrasena        = Hash::make($request->contrasena);
-        $usuario->telefono          = $request->telefono;
-        $usuario->organizaciones_id = $organizacionId;
-        $usuario->roles_id          = $rolId;
-        $usuario->estado            = $request->has('estado') ? (bool) $request->estado : true;
-        $usuario->save();
-
-        return response()->json(
-            UsuarioCrud::query()->find($usuario->id, $this->camposPublicos),
-            201
-        );
-    }
-
-    /**
-     * Edición de usuario.
-     * - ADMINISTRADOR: solo cuentas USUARIO de su organización; no cambia rol ni organización.
-     * - SUPERADMIN: puede cambiar rol y organización, sobre cualquier usuario.
-     */
-    public function update(Request $request, $id)
-    {
-        $user = $request->user();
-        if ($deny = $this->denegarSiNoEsAdministrativo($user)) {
-            return $deny;
-        }
-
-        $usuario = UsuarioCrud::query()->find($id);
-
-        if (!$usuario) {
-            return response()->json(['message' => 'Usuario no encontrado.'], 404);
-        }
-
-        // Aislamiento por organización + protección de cuentas privilegiadas.
-        if ($deny = $this->denegarObjetivoFueraDeAmbito($user, $usuario)) {
-            return $deny;
-        }
-
+        // 2. Reglas de validación
         $reglas = [
-            'nombre'           => 'required|string|max:100',
-            'apellido_paterno' => 'required|string|max:100',
-            'apellido_materno' => 'nullable|string|max:100',
-            'identificador'    => [
-                'required', 'uuid', 'max:100',
-                Rule::unique('usuarios', 'identificador')->ignore($usuario->id),
+            'nombre'      => 'required|string|max:100',
+            'apellido_pa' => 'required|string|max:100',
+            'apellido_ma' => 'nullable|string|max:100',
+            'identificador' => [
+                'required', 'string', 'max:100',
+                Rule::unique('usuarios', 'identificador')
+                    ->where('organizaciones_id', $organizacionId),
             ],
-            'correo'           => [
-                'nullable', 'email', 'max:150',
-                Rule::unique('usuarios', 'correo')->ignore($usuario->id),
-            ],
-            'contrasena'       => 'nullable|string|min:8',
-            'telefono'         => 'nullable|string|max:20',
-            'estado'           => 'boolean',
+            'email'    => 'nullable|email|max:150|unique:usuarios,email',
+            'password' => 'required|string|min:8',
+            'telefono' => 'nullable|string|max:20',
+            'estado'   => 'nullable|in:A,P',
         ];
 
-        // El superadmin puede (opcionalmente) modificar rol y organización.
         if ($this->esSuperadmin($user)) {
             $reglas['organizaciones_id'] = 'nullable|integer|exists:organizaciones,id';
             $reglas['roles_id']          = 'nullable|integer|exists:roles,id';
@@ -238,22 +141,90 @@ class UsuarioController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $usuario->nombre           = $request->nombre;
-        $usuario->apellido_paterno = $request->apellido_paterno;
-        $usuario->apellido_materno = $request->apellido_materno;
-        $usuario->identificador    = $request->identificador;
-        $usuario->telefono         = $request->telefono;
+        // 3. Crear el usuario
+        $usuario = new Usuario();
+        $usuario->nombre            = $request->nombre;
+        $usuario->apellido_pa       = $request->apellido_pa;
+        $usuario->apellido_ma       = $request->apellido_ma;
+        $usuario->identificador     = $request->identificador;
+        $usuario->email             = $request->filled('email') ? $request->email : null;
+        $usuario->password          = Hash::make($request->password);
+        $usuario->telefono          = $request->filled('telefono') ? $request->telefono : null;
+        $usuario->organizaciones_id = $organizacionId;
+        $usuario->roles_id          = $rolId;
+        $usuario->estado            = $request->filled('estado') ? $request->estado : 'A';
+        $usuario->save();
 
-        // Correo opcional. Solo se modifica si el campo viene EN la petición
-        // (aunque sea vacío -> NULL). Si el formulario no envía `correo`, se
-        // CONSERVA el valor actual (no se borra el correo de quien ya lo tenía).
-        if ($request->has('correo')) {
-            $usuario->correo = $request->filled('correo') ? $request->correo : null;
+        return response()->json(
+            Usuario::query()->find($usuario->id, $this->camposPublicos),
+            201
+        );
+    }
+
+    /**
+     * Edición de usuario.
+     * El identificador sigue siendo único por organización (ignorando el propio usuario).
+     */
+    public function update(Request $request, $id)
+    {
+        $user = $request->user();
+        if ($deny = $this->denegarSiNoEsAdministrativo($user)) {
+            return $deny;
         }
 
-        // Rol y organización: solo el superadmin puede cambiarlos, y solo si los
-        // envía. El administrador conserva los valores actuales del registro (no
-        // eleva privilegios ni mueve de organización, aunque intente enviarlos).
+        $usuario = Usuario::query()->find($id);
+
+        if (!$usuario) {
+            return response()->json(['message' => 'Usuario no encontrado.'], 404);
+        }
+
+        if ($deny = $this->denegarObjetivoFueraDeAmbito($user, $usuario)) {
+            return $deny;
+        }
+
+        $reglas = [
+            'nombre'      => 'required|string|max:100',
+            'apellido_pa' => 'required|string|max:100',
+            'apellido_ma' => 'nullable|string|max:100',
+            'identificador' => [
+                'required', 'string', 'max:100',
+                Rule::unique('usuarios', 'identificador')
+                    ->where('organizaciones_id', $usuario->organizaciones_id)
+                    ->ignore($usuario->id),
+            ],
+            'email' => [
+                'nullable', 'email', 'max:150',
+                Rule::unique('usuarios', 'email')->ignore($usuario->id),
+            ],
+            'password' => 'nullable|string|min:8',
+            'telefono' => 'nullable|string|max:20',
+            'estado'   => 'nullable|in:A,P',
+        ];
+
+        if ($this->esSuperadmin($user)) {
+            $reglas['organizaciones_id'] = 'nullable|integer|exists:organizaciones,id';
+            $reglas['roles_id']          = 'nullable|integer|exists:roles,id';
+        }
+
+        $validator = Validator::make($request->all(), $reglas);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $usuario->nombre        = $request->nombre;
+        $usuario->apellido_pa   = $request->apellido_pa;
+        $usuario->apellido_ma   = $request->apellido_ma;
+        $usuario->identificador = $request->identificador;
+
+        if ($request->has('email')) {
+            $usuario->email = $request->filled('email') ? $request->email : null;
+        }
+
+        if ($request->has('telefono')) {
+            $usuario->telefono = $request->filled('telefono') ? $request->telefono : null;
+        }
+
         if ($this->esSuperadmin($user)) {
             if ($request->filled('organizaciones_id')) {
                 $usuario->organizaciones_id = (int) $request->organizaciones_id;
@@ -263,26 +234,23 @@ class UsuarioController extends Controller
             }
         }
 
-        if ($request->has('estado')) {
-            $usuario->estado = (bool) $request->estado;
+        if ($request->filled('estado')) {
+            $usuario->estado = $request->estado;
         }
 
-        // La contraseña solo se actualiza si se envía una nueva.
-        if ($request->filled('contrasena')) {
-            $usuario->contrasena = Hash::make($request->contrasena);
+        if ($request->filled('password')) {
+            $usuario->password = Hash::make($request->password);
         }
 
         $usuario->save();
 
         return response()->json(
-            UsuarioCrud::query()->find($usuario->id, $this->camposPublicos)
+            Usuario::query()->find($usuario->id, $this->camposPublicos)
         );
     }
 
     /**
-     * Baja lógica: estado = false. No elimina físicamente.
-     * - ADMINISTRADOR: solo cuentas USUARIO de su organización.
-     * - SUPERADMIN: cualquiera.
+     * Baja lógica: estado = 'P'
      */
     public function destroy(Request $request, $id)
     {
@@ -291,18 +259,17 @@ class UsuarioController extends Controller
             return $deny;
         }
 
-        $usuario = UsuarioCrud::query()->find($id);
+        $usuario = Usuario::query()->find($id);
 
         if (!$usuario) {
             return response()->json(['message' => 'Usuario no encontrado.'], 404);
         }
 
-        // Aislamiento por organización + protección de cuentas privilegiadas.
         if ($deny = $this->denegarObjetivoFueraDeAmbito($user, $usuario)) {
             return $deny;
         }
 
-        $usuario->estado = false;
+        $usuario->estado = 'P';
         $usuario->save();
 
         return response()->json(['message' => 'Usuario eliminado correctamente.']);
@@ -310,9 +277,6 @@ class UsuarioController extends Controller
 
     /**
      * Catálogo de roles.
-     * - SUPERADMIN: todos los roles del sistema.
-     * - ADMINISTRADOR: solo el rol que puede asignar (USUARIO).
-     * - USUARIO: 403.
      */
     public function roles(Request $request)
     {
@@ -324,7 +288,6 @@ class UsuarioController extends Controller
         $query = Rol::query()->orderBy('id');
 
         if (!$this->esSuperadmin($user)) {
-            // Administrador: solo puede asignar el rol USUARIO.
             $query->where('id', Rol::USUARIO);
         }
 
@@ -333,9 +296,6 @@ class UsuarioController extends Controller
 
     /**
      * Catálogo de organizaciones.
-     * - SUPERADMIN: todas.
-     * - ADMINISTRADOR: únicamente su propia organización.
-     * - USUARIO: 403.
      */
     public function organizaciones(Request $request)
     {
@@ -347,7 +307,6 @@ class UsuarioController extends Controller
         $query = Organizacion::query()->orderBy('nombre');
 
         if (!$this->esSuperadmin($user)) {
-            // Administrador: solo su organización.
             $query->where('id', $user->organizaciones_id);
         }
 
