@@ -12,14 +12,13 @@ class Organizacion extends Model
         'nombre',
         'tipo',
         'direccion',
-        'colonia',
-        'ciudad',
-        'codigo_postal',
         'telefono',
+        'correo',
         'estado',
     ];
 
     protected $casts = [
+        'estado'     => 'boolean',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
