@@ -18,6 +18,7 @@ class Casillero extends Model
 
     protected $fillable = [
         'organizaciones_id',
+        'dispositivos_id',
         'numero',
         'estado',
         'ubicacion',
@@ -31,6 +32,11 @@ class Casillero extends Model
     public function organizacion()
     {
         return $this->belongsTo(Organizacion::class, 'organizaciones_id');
+    }
+
+    public function dispositivo()
+    {
+        return $this->belongsTo(Dispositivo::class, 'dispositivos_id');
     }
 
     public function asignaciones()
@@ -65,6 +71,11 @@ class Casillero extends Model
         return $this->hasMany(EventoCasillero::class, 'casilleros_id');
     }
 
+    public function accesos()
+    {
+        return $this->hasMany(Acceso::class, 'casilleros_id');
+    }
+
     public function estaOcupado(): bool
     {
         return $this->asignacionActiva()->exists();
@@ -73,5 +84,14 @@ class Casillero extends Model
     public function estaBloqueado(): bool
     {
         return $this->bloqueoActivo()->exists();
+    }
+
+    /**
+     * Posicion fisica de la cerradura en el ESP32.
+     * "A-03" -> 3
+     */
+    public function getPosicionAttribute(): int
+    {
+        return (int) substr($this->numero, -2);
     }
 }
