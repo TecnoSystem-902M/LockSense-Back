@@ -5,23 +5,41 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Controller;
 use App\Models\Acceso;
 use App\Models\Asignacion;
+use App\Models\Bloqueo;
 use App\Models\CredencialRfid;
 use App\Models\Dispositivo;
 use App\Models\EventoCasillero;
+use App\Services\NotificadorSeguridad;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 
 /**
- * Endpoints que consume el ESP32 (HU6: registro de accesos y eventos).
+ * Endpoints que consume el ESP32.
  *
- *   POST /api/dispositivo/acceso    Valida una tarjeta y registra el intento.
- *   POST /api/dispositivo/evento    Registra apertura/cierre de puerta y alertas.
+ *   POST /api/dispositivo/acceso    Valida una tarjeta y registra el intento (HU6).
+ *                                   Cuenta intentos fallidos y bloquea el lector (HU5).
+ *   POST /api/dispositivo/evento    Registra apertura/cierre de puerta y alertas (HU6, HU5).
  *   GET  /api/dispositivo/tarjetas  Lista de tarjetas para el modo sin conexion.
  */
 class DispositivoController extends Controller
 {
     private const CREDENCIAL_ACTIVA = 'A';
     private const ASIGNACION_ACTIVA = 'A';
+
+    // ---------- HU5: bloqueo del lector por intentos fallidos ----------
+    private const MAX_INTENTOS_FALLIDOS = 5;    // intentos para bloquear
+    private const VENTANA_SEGUNDOS      = 120;  // ...dentro de este tiempo
+    private const DURACION_BLOQUEO      = 30;   // segundos que dura el bloqueo
+    private const TIPO_BLOQUEO_LECTOR   = 'INTENTOS_FALLIDOS';
+
+    // Solo estos motivos cuentan como intento sospechoso.
+    // (Un casillero bloqueado por el administrador no cuenta.)
+    private const MOTIVOS_QUE_CUENTAN = [
+        'tarjeta_no_registrada',
+        'tarjeta_inactiva',
+        'sin_casillero_asignado',
+    ];
 
     private const EVENTOS_VALIDOS = [
         'puerta_abierta',
@@ -43,9 +61,18 @@ class DispositivoController extends Controller
         'intento_durante_bloqueo' => 'Se presentó una tarjeta mientras el lector estaba bloqueado.',
     ];
 
+    public function __construct(private NotificadorSeguridad $notificador)
+    {
+    }
+
     /**
      * POST /api/dispositivo/acceso
      * Body: { "uid": "D9 94 15 E6", "metodo": "rfid" }
+     *
+     * Respuestas:
+     *   { "permitido": true,  "posicion": 1, "acceso_id": 25 }
+     *   { "permitido": false, "motivo": "...", "acceso_id": 26 }
+     *   { "permitido": false, "motivo": "...", "acceso_id": 27, "bloqueado": true, "segundos_restantes": 30 }
      */
     public function acceso(Request $request): JsonResponse
     {
@@ -58,6 +85,13 @@ class DispositivoController extends Controller
         $dispositivo = $request->attributes->get('dispositivo');
         $uid = $this->normalizarUid($data['uid']);
         $metodo = $data['metodo'] ?? 'rfid';
+
+        // HU5: si el lector esta bloqueado, no se valida la tarjeta.
+        if ($bloqueo = $this->bloqueoLectorActivo($dispositivo)) {
+            $acceso = $this->registrarDenegado($dispositivo, $uid, $metodo, 'lector_bloqueado');
+
+            return $this->respuestaDenegado($acceso, $bloqueo);
+        }
 
         $credencial = CredencialRfid::whereRaw(
             "REPLACE(UPPER(codigo), ' ', '') = ?",
@@ -139,13 +173,7 @@ class DispositivoController extends Controller
             $descripcion .= ' UID: ' . $this->normalizarUid($data['uid']) . '.';
         }
 
-        $evento = EventoCasillero::create([
-            'tipo_evento'     => strtoupper($tipo),
-            'descripcion'     => mb_substr($descripcion, 0, 255),
-            'fecha_hora'      => now(),
-            'casilleros_id'   => $casillero?->id,
-            'dispositivos_id' => $dispositivo->id,
-        ]);
+        $evento = $this->registrarEvento($dispositivo, $tipo, $descripcion, $casillero?->id);
 
         // Completar el acceso con apertura, cierre y duracion.
         if (! empty($data['acceso_id'])) {
@@ -159,6 +187,11 @@ class DispositivoController extends Controller
                     'duracion_segundos' => $data['duracion_segundos'] ?? null,
                 ]);
             }
+        }
+
+        // HU5: la puerta se abrio sin autorizacion -> notificar.
+        if ($tipo === 'apertura_no_autorizada') {
+            $this->notificador->aperturaNoAutorizada($dispositivo, $casillero);
         }
 
         return response()->json(['registrado' => true, 'evento_id' => $evento->id]);
@@ -195,13 +228,101 @@ class DispositivoController extends Controller
     }
 
     // ==================================================
+    // HU5: bloqueo del lector
+    // ==================================================
+
+    /**
+     * Bloqueo del lector vigente, o null. Si ya vencio, lo desactiva.
+     */
+    private function bloqueoLectorActivo(Dispositivo $dispositivo): ?Bloqueo
+    {
+        $bloqueo = Bloqueo::where('dispositivos_id', $dispositivo->id)
+            ->whereNull('casilleros_id')
+            ->where('tipo', self::TIPO_BLOQUEO_LECTOR)
+            ->where('activo', 'A')
+            ->latest('id')
+            ->first();
+
+        if (! $bloqueo) {
+            return null;
+        }
+
+        if (Carbon::parse($bloqueo->fin)->isPast()) {
+            $bloqueo->update(['activo' => 'I']);
+            $this->registrarEvento($dispositivo, 'bloqueo_finalizado', self::DESCRIPCIONES['bloqueo_finalizado']);
+
+            return null;
+        }
+
+        return $bloqueo;
+    }
+
+    /**
+     * Cuenta los intentos fallidos recientes y, si se alcanza el limite,
+     * crea el bloqueo del lector y notifica a los administradores.
+     */
+    private function evaluarBloqueo(Dispositivo $dispositivo): ?Bloqueo
+    {
+        $desde = now()->subSeconds(self::VENTANA_SEGUNDOS);
+
+        // No volver a contar intentos de antes del ultimo bloqueo.
+        $finUltimoBloqueo = Bloqueo::where('dispositivos_id', $dispositivo->id)
+            ->where('tipo', self::TIPO_BLOQUEO_LECTOR)
+            ->max('fin');
+
+        if ($finUltimoBloqueo && Carbon::parse($finUltimoBloqueo)->greaterThan($desde)) {
+            $desde = Carbon::parse($finUltimoBloqueo);
+        }
+
+        $fallidos = $dispositivo->accesos()
+            ->where('resultado', Acceso::DENEGADO)
+            ->whereIn('motivo', self::MOTIVOS_QUE_CUENTAN)
+            ->where('fecha_hora', '>', $desde)
+            ->count();
+
+        if ($fallidos < self::MAX_INTENTOS_FALLIDOS) {
+            return null;
+        }
+
+        $bloqueo = Bloqueo::create([
+            'tipo'            => self::TIPO_BLOQUEO_LECTOR,
+            'motivo'          => "{$fallidos} intentos de acceso fallidos en menos de "
+                               . self::VENTANA_SEGUNDOS . ' segundos.',
+            'inicio'          => now(),
+            'fin'             => now()->addSeconds(self::DURACION_BLOQUEO),
+            'activo'          => 'A',
+            'casilleros_id'   => null,
+            'dispositivos_id' => $dispositivo->id,
+        ]);
+
+        $this->registrarEvento($dispositivo, 'bloqueo_activado',
+            self::DESCRIPCIONES['bloqueo_activado'] . " Intentos: {$fallidos}.");
+
+        $this->notificador->intentosFallidos($dispositivo, $fallidos, self::DURACION_BLOQUEO);
+
+        return $bloqueo;
+    }
+
+    // ==================================================
     // Auxiliares
     // ==================================================
 
     private function denegar(Dispositivo $dispositivo, string $uid, string $metodo, string $motivo,
                              ?int $usuarioId = null, ?int $casilleroId = null): JsonResponse
     {
-        $acceso = Acceso::create([
+        $acceso = $this->registrarDenegado($dispositivo, $uid, $metodo, $motivo, $usuarioId, $casilleroId);
+
+        $bloqueo = in_array($motivo, self::MOTIVOS_QUE_CUENTAN, true)
+            ? $this->evaluarBloqueo($dispositivo)
+            : null;
+
+        return $this->respuestaDenegado($acceso, $bloqueo);
+    }
+
+    private function registrarDenegado(Dispositivo $dispositivo, string $uid, string $metodo, string $motivo,
+                                       ?int $usuarioId = null, ?int $casilleroId = null): Acceso
+    {
+        return Acceso::create([
             'metodo'          => $metodo,
             'resultado'       => Acceso::DENEGADO,
             'motivo'          => $motivo,
@@ -211,11 +332,35 @@ class DispositivoController extends Controller
             'dispositivos_id' => $dispositivo->id,
             'codigo_leido'    => $uid,
         ]);
+    }
 
-        return response()->json([
+    private function respuestaDenegado(Acceso $acceso, ?Bloqueo $bloqueo): JsonResponse
+    {
+        $respuesta = [
             'permitido' => false,
-            'motivo'    => $motivo,
+            'motivo'    => $acceso->motivo,
             'acceso_id' => $acceso->id,
+        ];
+
+        if ($bloqueo) {
+            $respuesta['bloqueado'] = true;
+            $respuesta['segundos_restantes'] = max(1, (int) ceil(
+                now()->diffInSeconds(Carbon::parse($bloqueo->fin), false)
+            ));
+        }
+
+        return response()->json($respuesta);
+    }
+
+    private function registrarEvento(Dispositivo $dispositivo, string $tipo, string $descripcion,
+                                     ?int $casilleroId = null): EventoCasillero
+    {
+        return EventoCasillero::create([
+            'tipo_evento'     => strtoupper($tipo),
+            'descripcion'     => mb_substr($descripcion, 0, 255),
+            'fecha_hora'      => now(),
+            'casilleros_id'   => $casilleroId,
+            'dispositivos_id' => $dispositivo->id,
         ]);
     }
 
