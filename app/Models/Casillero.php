@@ -21,7 +21,6 @@ class Casillero extends Model
         'dispositivos_id',
         'numero',
         'estado',
-        'ubicacion',
     ];
 
     protected $casts = [
