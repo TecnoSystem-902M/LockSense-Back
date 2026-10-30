@@ -22,19 +22,45 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, Header, UploadFile, File
 from fastapi.responses import JSONResponse
 
+logger = logging.getLogger("face-service")
+
+# Carga de variables de entorno desde el archivo `.env` del servicio.
+#
+# El `.env` vive en la RAÍZ de face-service (un nivel por encima de este
+# archivo, que está en face-service/app/). La ruta se resuelve a partir de
+# `__file__`, por lo que funciona sin importar desde qué directorio se arranque
+# el servicio (no depende del CWD).
+#
+# Fallo seguro: si `python-dotenv` no está instalado o el `.env` no existe, NO
+# se interrumpe el arranque ni se inventan valores. El servicio conserva su
+# comportamiento: sin FACE_SERVICE_API_KEY en el entorno, rechaza toda petición
+# de reconocimiento (ver `_api_key_configurada` y el endpoint /v1/embed).
+# Nunca se imprime ni registra el valor de la clave.
+_DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+try:
+    from dotenv import load_dotenv
+
+    # override=False: respeta las variables ya presentes en el entorno real
+    # (p. ej. las inyectadas por el sistema o el contenedor) sobre el .env.
+    load_dotenv(dotenv_path=_DOTENV_PATH, override=False)
+except ImportError:
+    logger.warning(
+        "python-dotenv no está instalado; no se cargará el archivo .env. "
+        "Las variables deben venir del entorno del sistema."
+    )
+
 # Dimensión esperada del embedding (ArcFace / buffalo_l).
 EMBEDDING_DIM = 512
 
 # Límite de tamaño de imagen por defecto: 8 MB. Configurable por entorno.
 DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024
-
-logger = logging.getLogger("face-service")
 
 # Estado del modelo cargado una sola vez al arrancar.
 _state: dict[str, object] = {"model": None, "model_name": None}

@@ -10,3 +10,8 @@ onnxruntime==1.31.0
 numpy==2.4.6
 opencv-python==5.0.0.93
 pillow==13.0.0
+
+# Carga del archivo .env del servicio (face-service/.env) en el arranque.
+# Lo usa app/main.py mediante load_dotenv(). Instalar con:
+#   pip install -r requirements.txt
+python-dotenv==1.0.1
