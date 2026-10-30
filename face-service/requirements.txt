@@ -1,0 +1,12 @@
+# LockSense — Servicio de reconocimiento facial.
+# Versiones fijadas según el entorno ya instalado en .venv (Python 3.11.9, 64 bits).
+# NO reinstalar ni actualizar: estas versiones ya están presentes y verificadas.
+
+fastapi==0.162.0
+uvicorn==0.54.0
+python-multipart==0.0.32
+insightface==2.1
+onnxruntime==1.31.0
+numpy==2.4.6
+opencv-python==5.0.0.93
+pillow==13.0.0

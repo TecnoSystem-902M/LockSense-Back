@@ -5,6 +5,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\UsuarioController;
 use App\Http\Controllers\CasilleroController;
 use App\Http\Controllers\DispositivoController;
+use App\Http\Controllers\RostroController;
 use App\Http\Middleware\AutenticarDispositivo;
 use Illuminate\Support\Facades\Route;
 
@@ -21,6 +22,9 @@ Route::post('/reset-password', [AuthController::class, 'resetPassword']);
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/me', [AuthController::class, 'me']);
+
+    // Registro facial (HU10): recibe la imagen y la envía al servicio Python.
+    Route::post('/rostro', [RostroController::class, 'store']);
 
     // Métricas dinámicas del Dashboard
     Route::get('/dashboard/metrics', [DashboardController::class, 'metrics']);
