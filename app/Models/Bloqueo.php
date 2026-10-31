@@ -15,6 +15,7 @@ class Bloqueo extends Model
         'fin',
         'activo',
         'casilleros_id',
+        'dispositivos_id',
     ];
 
     protected $casts = [
@@ -28,4 +29,9 @@ class Bloqueo extends Model
     {
         return $this->belongsTo(Casillero::class, 'casilleros_id');
     }
+
+    public function dispositivo()
+{
+    return $this->belongsTo(Dispositivo::class, 'dispositivos_id');
+}
 }
