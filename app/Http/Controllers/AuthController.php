@@ -435,6 +435,7 @@ class AuthController extends Controller
                 'estado'        => $usuario->estado,
                 'rol'           => $usuario->rol->nombre,
                 'rol_id'        => $usuario->rol->id,
+                'tiene_rostro'  => $usuario->rostroActivo()->exists(),
                 'organizacion'  => [
                     'id'     => $usuario->organizacion->id,
                     'nombre' => $usuario->organizacion->nombre,
@@ -469,6 +470,7 @@ class AuthController extends Controller
                 'identificador' => $usuario->identificador,
                 'rol'           => $usuario->rol->nombre,
                 'rol_id'        => $usuario->rol->id,
+                'tiene_rostro'  => $usuario->rostroActivo()->exists(),
                 'organizacion'  => $usuario->organizacion->nombre,
             ],
         ]);

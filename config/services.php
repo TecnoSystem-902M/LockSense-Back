@@ -35,4 +35,17 @@ return [
         ],
     ],
 
+    /*
+    | Servicio externo de reconocimiento facial (Python / FastAPI + InsightFace).
+    | El servicio todavía NO existe; estas claves solo definen de dónde leer la
+    | URL base y la API key compartida entre servidores. La API key nunca se
+    | expone al frontend ni se registra en logs.
+    */
+    'face' => [
+        'url' => env('FACE_SERVICE_URL'),
+        'key' => env('FACE_SERVICE_API_KEY'),
+        // Tiempo máximo de espera (segundos) al servicio Python.
+        'timeout' => (int) env('FACE_SERVICE_TIMEOUT', 15),
+    ],
+
 ];

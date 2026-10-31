@@ -41,4 +41,25 @@ class Usuario extends Authenticatable
     {
         return $this->belongsTo(Rol::class, 'roles_id');
     }
+
+    /**
+     * Rostros del usuario. La tabla `rostros` NO tiene UNIQUE sobre
+     * `usuarios_id`, por lo que puede haber más de un registro; se modela
+     * como hasMany para no asumir unicidad.
+     */
+    public function rostros()
+    {
+        return $this->hasMany(Rostro::class, 'usuarios_id');
+    }
+
+    /**
+     * Rostro activo (estado = 'A'), si existe. Se usa para calcular el
+     * indicador `tiene_rostro` sin considerar registros inactivos.
+     */
+    public function rostroActivo()
+    {
+        return $this->hasOne(Rostro::class, 'usuarios_id')
+            ->where('estado', 'A')
+            ->latest('id');
+    }
 }

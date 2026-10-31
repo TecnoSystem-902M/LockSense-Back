@@ -13,12 +13,10 @@ class Organizacion extends Model
         'tipo',
         'direccion',
         'telefono',
-        'correo',
         'estado',
     ];
 
     protected $casts = [
-        'estado'     => 'boolean',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
