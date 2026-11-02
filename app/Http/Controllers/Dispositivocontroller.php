@@ -501,8 +501,8 @@ class DispositivoController extends Controller
 
         // Se guarda en la base de datos (Render no conserva archivos).
         // Solo el administrador la puede ver con GET /api/anomalias/{id}/evidencia.
-        DB::transaction(function () use ($anomalia, $orden, $imagen, $bytes) {
-            Evidencia::create([
+        $evidencia = DB::transaction(function () use ($anomalia, $orden, $imagen, $bytes) {
+            $evidencia = Evidencia::create([
                 'imagen_base64' => base64_encode($bytes),
                 'mime'          => $imagen->getMimeType() ?: 'image/jpeg',
                 'tamano_bytes'  => strlen($bytes),
@@ -511,16 +511,22 @@ class DispositivoController extends Controller
             ]);
 
             if (! $anomalia->evidencia_url) {
-                $anomalia->update(['evidencia_url' => "/api/anomalias/{$anomalia->id}/evidencia"]);
+                $anomalia->update(['evidencia_url' => "/api/mis-anomalias/{$anomalia->id}/evidencia"]);
             }
 
             $orden->update(['estado' => OrdenDispositivo::COMPLETADA]);
+
+            return $evidencia;
         });
 
         // Retencion: las fotos de mas de 30 dias se borran solas.
         Evidencia::borrarVencidas();
 
-        // Paso 4 (YOLO): aqui se analizara la foto.
+        // HU7: analizar la foto con YOLO (personas y objetos sospechosos).
+        // Solo la primera foto de cada anomalia (si hubiera varias camaras).
+        if (Evidencia::where('anomalias_id', $anomalia->id)->count() === 1) {
+            $this->anomalias->analizarEvidencia($anomalia->fresh(), $evidencia, $camara);
+        }
 
         return response()->json([
             'guardada'    => true,

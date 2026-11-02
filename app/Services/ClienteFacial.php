@@ -12,6 +12,7 @@ use Throwable;
  *
  *   obtenerEmbedding(): manda la foto a POST /v1/embed y devuelve el vector.
  *   similitud():        compara dos vectores (similitud coseno, -1 a 1).
+ *   detectarObjetos():  manda la foto a POST /v1/detect (YOLO, HU7).
  *
  * Usa la misma configuracion que el registro facial:
  *   services.face.url, services.face.key, services.face.timeout
@@ -128,6 +129,51 @@ class ClienteFacial
         }
 
         return $producto / (sqrt($normaA) * sqrt($normaB));
+    }
+
+    /**
+     * HU7: detecta personas y objetos en una foto con YOLO.
+     *
+     * Exito: ['ok' => true, 'personas' => 2, 'confianza_personas' => 0.87,
+     *         'sospechosos' => [['clase' => 'knife', 'nombre' => 'cuchillo', 'confianza' => 0.61]],
+     *         'modelo' => 'yolov8n']
+     * Error: ['ok' => false, 'code' => '...']
+     */
+    public function detectarObjetos(string $bytes, string $nombreArchivo = 'evidencia.jpg'): array
+    {
+        $url = config('services.face.url');
+        $key = config('services.face.key');
+
+        if (empty($url) || empty($key)) {
+            return ['ok' => false, 'code' => 'servicio_no_configurado'];
+        }
+
+        try {
+            $respuesta = Http::timeout((int) config('services.face.timeout', 15))
+                ->withHeaders(['X-API-Key' => $key])
+                ->attach('image', $bytes, $nombreArchivo)
+                ->post(rtrim($url, '/') . '/v1/detect');
+        } catch (Throwable $e) {
+            Log::error('YOLO: fallo al contactar el servicio.', ['exception' => get_class($e)]);
+
+            return ['ok' => false, 'code' => 'servicio_no_disponible'];
+        }
+
+        $datos = $respuesta->json();
+
+        if (! $respuesta->successful() || ! is_array($datos) || ($datos['ok'] ?? null) !== true) {
+            Log::warning('YOLO: el servicio no pudo analizar la foto.', ['status' => $respuesta->status()]);
+
+            return ['ok' => false, 'code' => is_array($datos) ? ($datos['code'] ?? 'error') : 'error'];
+        }
+
+        return [
+            'ok'                 => true,
+            'personas'           => (int) ($datos['personas'] ?? 0),
+            'confianza_personas' => (float) ($datos['confianza_personas'] ?? 0),
+            'sospechosos'        => is_array($datos['sospechosos'] ?? null) ? $datos['sospechosos'] : [],
+            'modelo'             => (string) ($datos['modelo'] ?? 'yolo'),
+        ];
     }
 
     private function embeddingValido(?array $datos): bool

@@ -6,6 +6,7 @@ use App\Models\Acceso;
 use App\Models\Anomalia;
 use App\Models\Casillero;
 use App\Models\Dispositivo;
+use App\Models\Evidencia;
 use App\Models\OrdenDispositivo;
 
 /**
@@ -23,8 +24,13 @@ class RegistroAnomalias
     // Segundos que la camara tiene para recoger la orden de foto.
     private const VIGENCIA_ORDEN_FOTO = 20;
 
-    public function __construct(private NotificadorSeguridad $notificador)
-    {
+    // HU7 (YOLO): a partir de cuantas personas se considera anomalia.
+    private const PERSONAS_SOSPECHOSAS = 2;
+
+    public function __construct(
+        private NotificadorSeguridad $notificador,
+        private ClienteFacial $clienteFacial,
+    ) {
     }
 
     // ==================================================
@@ -115,7 +121,101 @@ class RegistroAnomalias
     }
 
     // ==================================================
-    // Generico (para las etapas siguientes: YOLO, Isolation Forest)
+    // HU7: analisis de la foto de evidencia con YOLO
+    // ==================================================
+
+    /**
+     * Analiza la foto de evidencia de una anomalia con YOLO:
+     *   - Agrega a la descripcion lo que se vio (personas, objetos).
+     *   - Si hay 2 o mas personas  -> anomalia PERSONAS_MULTIPLES.
+     *   - Si hay objetos sospechosos -> anomalia OBJETO_SOSPECHOSO.
+     * Las nuevas anomalias llevan la misma foto y van al mismo dueno.
+     *
+     * Si el servicio de Python no responde, no pasa nada: la anomalia
+     * original y su foto ya quedaron guardadas.
+     */
+    public function analizarEvidencia(Anomalia $anomalia, Evidencia $evidencia, ?Dispositivo $camara = null): void
+    {
+        $resultado = $this->clienteFacial->detectarObjetos(base64_decode($evidencia->imagen_base64));
+
+        if (! $resultado['ok']) {
+            return;
+        }
+
+        $personas    = $resultado['personas'];
+        $sospechosos = $resultado['sospechosos'];
+
+        // 1) Completar la descripcion de la anomalia original.
+        $vio = $personas === 0
+            ? 'no se detectó a ninguna persona (posible falsa alarma)'
+            : ($personas === 1 ? 'se detectó 1 persona' : "se detectaron {$personas} personas");
+
+        if ($sospechosos) {
+            $vio .= ' y ' . $this->listarObjetos($sospechosos);
+        }
+
+        $anomalia->update([
+            'descripcion' => rtrim($anomalia->descripcion, '.') . ". Cámara: {$vio}.",
+        ]);
+
+        $comunes = [
+            'origen'            => Anomalia::ORIGEN_IA_IMAGEN,
+            'organizaciones_id' => $anomalia->organizaciones_id,
+            'dispositivos_id'   => $camara?->id ?? $anomalia->dispositivos_id,   // la camara que tomo la foto
+            'casilleros_id'     => $anomalia->casilleros_id,
+            'usuarios_id'       => $anomalia->usuarios_id,
+            'accesos_id'        => $anomalia->accesos_id,
+        ];
+
+        $casillero = $anomalia->casillero ? "el casillero {$anomalia->casillero->numero}" : 'un casillero';
+
+        // 2) Varias personas frente al casillero.
+        if ($personas >= self::PERSONAS_SOSPECHOSAS) {
+            $nueva = $this->registrar($comunes + [
+                'tipo'         => Anomalia::TIPO_PERSONAS_MULTIPLES,
+                'descripcion'  => "La cámara detectó {$personas} personas frente a {$casillero} "
+                                . 'durante un evento sospechoso.',
+                'nivel_riesgo' => Anomalia::RIESGO_ALTO,
+                'confianza'    => round($resultado['confianza_personas'], 4),
+            ]);
+            $this->copiarEvidencia($evidencia, $nueva);
+        }
+
+        // 3) Objetos sospechosos (cuchillo, tijeras, bate).
+        if ($sospechosos) {
+            $nueva = $this->registrar($comunes + [
+                'tipo'         => Anomalia::TIPO_OBJETO_SOSPECHOSO,
+                'descripcion'  => 'La cámara detectó ' . $this->listarObjetos($sospechosos)
+                                . " frente a {$casillero}.",
+                'nivel_riesgo' => Anomalia::RIESGO_CRITICO,
+                'confianza'    => round(max(array_column($sospechosos, 'confianza')), 4),
+            ]);
+            $this->copiarEvidencia($evidencia, $nueva);
+        }
+    }
+
+    private function listarObjetos(array $sospechosos): string
+    {
+        $nombres = array_unique(array_map(fn ($o) => $o['nombre'] ?? $o['clase'], $sospechosos));
+
+        return 'un objeto sospechoso (' . implode(', ', $nombres) . ')';
+    }
+
+    private function copiarEvidencia(Evidencia $evidencia, Anomalia $destino): void
+    {
+        Evidencia::create([
+            'imagen_base64' => $evidencia->imagen_base64,
+            'mime'          => $evidencia->mime,
+            'tamano_bytes'  => $evidencia->tamano_bytes,
+            'created_at'    => now(),
+            'anomalias_id'  => $destino->id,
+        ]);
+
+        $destino->update(['evidencia_url' => "/api/mis-anomalias/{$destino->id}/evidencia"]);
+    }
+
+    // ==================================================
+    // Generico (para las etapas siguientes: Isolation Forest)
     // ==================================================
 
     /**
