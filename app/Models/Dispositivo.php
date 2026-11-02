@@ -7,8 +7,11 @@ use Illuminate\Database\Eloquent\Model;
 class Dispositivo extends Model
 {
     protected $table = 'dispositivos';
+    const TIPO_CERRADURAS = 'CERRADURAS';
+    const TIPO_CAMARA     = 'CAMARA';
 
     protected $fillable = [
+        'tipo', 
         'identificador',      // MAC del ESP32
         'token',              // hash SHA-256 del token
         'estado',             // 'A' = activo, 'I' = inactivo
@@ -54,5 +57,18 @@ class Dispositivo extends Model
     public function estaActivo(): bool
     {
         return $this->estado === 'A';
+    }
+
+    public function esCamara(): bool
+    {
+        return $this->tipo === self::TIPO_CAMARA;
+    }
+ 
+    /** Camaras activas (para pedirles fotos de evidencia). */
+    public function scopeCamarasActivas($query, int $organizacionId)
+    {
+        return $query->where('organizaciones_id', $organizacionId)
+            ->where('tipo', self::TIPO_CAMARA)
+            ->where('estado', 'A');
     }
 }

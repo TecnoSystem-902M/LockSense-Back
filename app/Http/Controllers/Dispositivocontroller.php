@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\Acceso;
+use App\Models\Anomalia;
 use App\Models\Asignacion;
 use App\Models\Bloqueo;
 use App\Models\CredencialRfid;
@@ -18,6 +19,8 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 /**
  * Endpoints que consumen los ESP32.
@@ -29,7 +32,9 @@ use Illuminate\Support\Facades\DB;
  *
  *   POST /api/dispositivo/rostro    (ESP32-CAM) Reconoce el rostro de la foto y, si
  *                                   coincide, deja una orden de abrir (HU2).
- *   GET  /api/dispositivo/ordenes   (ESP32 de cerraduras) Entrega las ordenes pendientes.
+ *   GET  /api/dispositivo/ordenes   Entrega las ordenes pendientes (ABRIR al ESP32 de
+ *                                   cerraduras, TOMAR_FOTO a la ESP32-CAM).
+ *   POST /api/dispositivo/evidencia (ESP32-CAM) Sube la foto de evidencia de una anomalia (HU7).
  */
 class DispositivoController extends Controller
 {
@@ -78,6 +83,9 @@ class DispositivoController extends Controller
         'bloqueo_activado',
         'bloqueo_finalizado',
         'intento_durante_bloqueo',
+        // HU7
+        'vibracion_detectada',
+        'puerta_abierta_prolongada',
     ];
 
     private const DESCRIPCIONES = [
@@ -88,6 +96,8 @@ class DispositivoController extends Controller
         'bloqueo_activado'        => 'Lector bloqueado temporalmente por intentos fallidos.',
         'bloqueo_finalizado'      => 'Terminó el bloqueo temporal del lector.',
         'intento_durante_bloqueo' => 'Se presentó una tarjeta mientras el lector estaba bloqueado.',
+        'vibracion_detectada'     => 'Se detectó un golpe o vibración fuerte en el casillero.',
+        'puerta_abierta_prolongada' => 'La puerta lleva demasiado tiempo abierta.',
     ];
 
     public function __construct(
@@ -229,6 +239,21 @@ class DispositivoController extends Controller
         // HU5/HU7: la puerta se abrio sin autorizacion -> anomalia + notificacion.
         if ($tipo === 'apertura_no_autorizada') {
             $this->anomalias->aperturaNoAutorizada($dispositivo, $casillero);
+        }
+
+        // HU7: golpe / intento de forzar el casillero (sensor SW-420).
+        if ($tipo === 'vibracion_detectada') {
+            $this->anomalias->vibracion($dispositivo, $casillero);
+        }
+
+        // HU7: la puerta se quedo abierta demasiado tiempo.
+        if ($tipo === 'puerta_abierta_prolongada') {
+            $this->anomalias->puertaAbiertaProlongada(
+                $dispositivo,
+                $casillero,
+                $data['duracion_segundos'] ?? null,
+                ! empty($data['acceso_id']) ? (int) $data['acceso_id'] : null
+            );
         }
 
         return response()->json(['registrado' => true, 'evento_id' => $evento->id]);
@@ -426,7 +451,73 @@ class DispositivoController extends Controller
                 'tipo'      => $orden->tipo,
                 'posicion'  => $orden->posicion,
                 'acceso_id' => $orden->accesos_id,
+                'anomalia_id' => $orden->anomalias_id,
             ])->values(),
+        ]);
+    }
+
+    // ==================================================
+    // HU7: foto de evidencia de anomalias
+    // ==================================================
+
+    /**
+     * POST /api/dispositivo/evidencia   (lo llama la ESP32-CAM)
+     * multipart/form-data: imagen (JPG) + orden_id
+     *
+     * La orden debe ser TOMAR_FOTO, de esta camara y ya entregada.
+     * Respuesta: { "guardada": true, "anomalia_id": 12 }
+     */
+    public function evidencia(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'imagen'   => ['required', 'file', 'image', 'mimes:jpg,jpeg,png', 'max:8192'],
+            'orden_id' => ['required', 'integer'],
+        ]);
+
+        /** @var Dispositivo $camara */
+        $camara = $request->attributes->get('dispositivo');
+
+        $orden = OrdenDispositivo::where('id', $data['orden_id'])
+            ->where('dispositivos_id', $camara->id)
+            ->where('tipo', OrdenDispositivo::TIPO_TOMAR_FOTO)
+            ->where('estado', OrdenDispositivo::ENTREGADA)
+            ->first();
+
+        if (! $orden || ! $orden->anomalias_id) {
+            return response()->json([
+                'guardada' => false,
+                'motivo'   => 'orden_invalida',
+            ], 422);
+        }
+
+        $anomalia = Anomalia::find($orden->anomalias_id);
+
+        if (! $anomalia) {
+            return response()->json(['guardada' => false, 'motivo' => 'anomalia_no_encontrada'], 422);
+        }
+
+        // Se guarda en el disco privado (no publico): solo el administrador
+        // la puede ver con GET /api/anomalias/{id}/evidencia.
+        $ruta = $request->file('imagen')->storeAs(
+            'evidencias/' . now()->format('Y-m'),
+            'anomalia_' . $anomalia->id . '_' . Str::random(8) . '.jpg',
+            'local'
+        );
+
+        DB::transaction(function () use ($anomalia, $orden, $ruta) {
+            // Si hubiera varias camaras, se queda la primera foto como evidencia principal.
+            if (! $anomalia->evidencia_url) {
+                $anomalia->update(['evidencia_url' => $ruta]);
+            }
+
+            $orden->update(['estado' => OrdenDispositivo::COMPLETADA]);
+        });
+
+        // Paso 4 (YOLO): aqui se analizara la foto.
+
+        return response()->json([
+            'guardada'    => true,
+            'anomalia_id' => $anomalia->id,
         ]);
     }
 

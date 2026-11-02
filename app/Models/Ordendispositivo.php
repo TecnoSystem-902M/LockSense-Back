@@ -12,11 +12,13 @@ class OrdenDispositivo extends Model
 {
     protected $table = 'ordenes_dispositivo';
 
-    const TIPO_ABRIR = 'ABRIR';
+    const TIPO_ABRIR       = 'ABRIR';        // HU2: ESP32 de cerraduras
+    const TIPO_TOMAR_FOTO  = 'TOMAR_FOTO';   // HU7: ESP32-CAM (evidencia de anomalia)
 
     const PENDIENTE = 'P';
     const ENTREGADA = 'E';
     const EXPIRADA  = 'X';
+    const COMPLETADA = 'C';   // la camara ya subio la foto
 
     protected $fillable = [
         'tipo',
@@ -27,6 +29,7 @@ class OrdenDispositivo extends Model
         'dispositivos_id',
         'casilleros_id',
         'accesos_id',
+        'anomalias_id',
     ];
 
     protected $casts = [
@@ -50,5 +53,10 @@ class OrdenDispositivo extends Model
     public function acceso()
     {
         return $this->belongsTo(Acceso::class, 'accesos_id');
+    }
+
+    public function anomalia()
+    {
+        return $this->belongsTo(Anomalia::class, 'anomalias_id');
     }
 }

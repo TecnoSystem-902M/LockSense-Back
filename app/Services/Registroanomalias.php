@@ -2,9 +2,11 @@
 
 namespace App\Services;
 
+use App\Models\Acceso;
 use App\Models\Anomalia;
 use App\Models\Casillero;
 use App\Models\Dispositivo;
+use App\Models\OrdenDispositivo;
 
 /**
  * HU7: registra anomalias en la tabla `anomalias` y genera la alerta
@@ -12,9 +14,15 @@ use App\Models\Dispositivo;
  *
  * Toda deteccion (sensores, YOLO, Isolation Forest) pasa por aqui, para que
  * todas queden guardadas igual y generen su notificacion.
+ *
+ * Etapa 3: las anomalias detectadas por sensores (origen REGLA) piden una
+ * foto de evidencia a la ESP32-CAM de la organizacion (orden TOMAR_FOTO).
  */
 class RegistroAnomalias
 {
+    // Segundos que la camara tiene para recoger la orden de foto.
+    private const VIGENCIA_ORDEN_FOTO = 20;
+
     public function __construct(private NotificadorSeguridad $notificador)
     {
     }
@@ -62,8 +70,51 @@ class RegistroAnomalias
         return $anomalia;
     }
 
+    /** Golpe o vibracion fuerte (sensor SW-420): posible intento de forzar. */
+    public function vibracion(Dispositivo $dispositivo, ?Casillero $casillero): Anomalia
+    {
+        $nombre = $casillero ? "el casillero {$casillero->numero}" : 'un casillero';
+
+        return $this->registrar([
+            'tipo'              => Anomalia::TIPO_VIBRACION,
+            'descripcion'       => "Se detectó un golpe o vibración fuerte en {$nombre}. "
+                                 . 'Posible intento de forzarlo.',
+            'nivel_riesgo'      => Anomalia::RIESGO_ALTO,
+            'confianza'         => 1,
+            'origen'            => Anomalia::ORIGEN_REGLA,
+            'organizaciones_id' => $dispositivo->organizaciones_id,
+            'dispositivos_id'   => $dispositivo->id,
+            'casilleros_id'     => $casillero?->id,
+        ]);
+    }
+
+    /** La puerta se quedo abierta mas tiempo del permitido. */
+    public function puertaAbiertaProlongada(Dispositivo $dispositivo, ?Casillero $casillero,
+                                            ?int $segundos, ?int $accesoId): Anomalia
+    {
+        $nombre = $casillero ? "El casillero {$casillero->numero}" : 'Un casillero';
+        $tiempo = $segundos ? " ({$segundos} s)" : '';
+
+        // Solo se liga el acceso si existe (evita error de llave foranea).
+        if ($accesoId && ! Acceso::whereKey($accesoId)->exists()) {
+            $accesoId = null;
+        }
+
+        return $this->registrar([
+            'tipo'              => Anomalia::TIPO_PUERTA_ABIERTA_PROLONGADA,
+            'descripcion'       => "{$nombre} lleva demasiado tiempo abierto{$tiempo}.",
+            'nivel_riesgo'      => Anomalia::RIESGO_MEDIO,
+            'confianza'         => 1,
+            'origen'            => Anomalia::ORIGEN_REGLA,
+            'organizaciones_id' => $dispositivo->organizaciones_id,
+            'dispositivos_id'   => $dispositivo->id,
+            'casilleros_id'     => $casillero?->id,
+            'accesos_id'        => $accesoId,
+        ]);
+    }
+
     // ==================================================
-    // Generico (para las etapas siguientes: vibracion, YOLO, Isolation Forest)
+    // Generico (para las etapas siguientes: YOLO, Isolation Forest)
     // ==================================================
 
     /**
@@ -81,9 +132,44 @@ class RegistroAnomalias
 
     private function crear(array $datos): Anomalia
     {
-        return Anomalia::create(array_merge([
+        $anomalia = Anomalia::create(array_merge([
             'estado'     => Anomalia::PENDIENTE,
             'fecha_hora' => now(),
         ], $datos));
+
+        // Solo las de sensores piden foto (las de IA ya vienen de una foto o de datos).
+        if ($anomalia->origen === Anomalia::ORIGEN_REGLA) {
+            $this->solicitarEvidencia($anomalia);
+        }
+
+        return $anomalia;
+    }
+
+    /**
+     * Deja una orden TOMAR_FOTO para cada camara activa de la organizacion.
+     * La ESP32-CAM la recoge con GET /api/dispositivo/ordenes y sube la foto
+     * a POST /api/dispositivo/evidencia.
+     */
+    private function solicitarEvidencia(Anomalia $anomalia): void
+    {
+        if (! $anomalia->organizaciones_id) {
+            return;
+        }
+
+        $posicion = $anomalia->casillero?->posicion ?? 0;
+
+        $camaras = Dispositivo::camarasActivas($anomalia->organizaciones_id)->get();
+
+        foreach ($camaras as $camara) {
+            OrdenDispositivo::create([
+                'tipo'            => OrdenDispositivo::TIPO_TOMAR_FOTO,
+                'posicion'        => $posicion,
+                'estado'          => OrdenDispositivo::PENDIENTE,
+                'expira_en'       => now()->addSeconds(self::VIGENCIA_ORDEN_FOTO),
+                'dispositivos_id' => $camara->id,
+                'casilleros_id'   => $anomalia->casilleros_id,
+                'anomalias_id'    => $anomalia->id,
+            ]);
+        }
     }
 }

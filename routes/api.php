@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AnomaliaController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\UsuarioController;
@@ -47,6 +48,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/casilleros/{id}/asignacion', [CasilleroController::class, 'asignacion']);
     Route::post('/casilleros/{id}/asignar', [CasilleroController::class, 'asignar']);
     Route::post('/casilleros/{id}/liberar', [CasilleroController::class, 'liberar']);
+
+    // Anomalías (HU7): solo ADMINISTRADOR
+    Route::get('/anomalias', [AnomaliaController::class, 'index']);
+    Route::get('/anomalias/resumen', [AnomaliaController::class, 'resumen']);
+    Route::patch('/anomalias/{id}/estado', [AnomaliaController::class, 'actualizarEstado']);
 });
 
 Route::prefix('dispositivo')
@@ -56,7 +62,7 @@ Route::prefix('dispositivo')
         Route::post('/evento', [DispositivoController::class, 'evento']);
         Route::get('/tarjetas', [DispositivoController::class, 'tarjetas']);
 
-        Route::post('/rostro', [DispositivoController::class, 'rostro']);    
-        Route::get('/ordenes', [DispositivoController::class, 'ordenes']);   
+        // HU2: acceso facial
+        Route::post('/rostro', [DispositivoController::class, 'rostro']);
+        Route::get('/ordenes', [DispositivoController::class, 'ordenes']);
     });
-

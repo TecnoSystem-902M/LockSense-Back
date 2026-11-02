@@ -5,7 +5,9 @@ namespace App\Http\Controllers;
 use App\Models\Anomalia;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * HU7: consulta y revision de anomalias (panel del ADMINISTRADOR).
@@ -13,6 +15,7 @@ use Illuminate\Validation\Rule;
  *   GET   /api/anomalias              Lista (filtros: estado, tipo, nivel_riesgo, desde, hasta)
  *   GET   /api/anomalias/resumen      Conteos para el dashboard
  *   PATCH /api/anomalias/{id}/estado  Marcar como revisada o descartada
+ *   GET   /api/anomalias/{id}/evidencia  Foto de evidencia (imagen JPG)
  *
  * Cada administrador solo ve las anomalias de su organizacion.
  */
@@ -88,6 +91,25 @@ class AnomaliaController extends Controller
         ]);
     }
 
+    /**
+     * Devuelve la foto de evidencia. Esta guardada en el disco privado, asi
+     * que solo se puede ver con el token del administrador.
+     * (En React: pedirla con axios responseType 'blob' y mostrarla con
+     *  URL.createObjectURL.)
+     */
+    public function evidencia(Request $request, int $id): StreamedResponse
+    {
+        $usuario = $this->administrador($request);
+
+        $anomalia = Anomalia::where('organizaciones_id', $usuario->organizaciones_id)
+            ->findOrFail($id);
+
+        abort_unless($anomalia->evidencia_url && Storage::disk('local')->exists($anomalia->evidencia_url),
+            404, 'Esta anomalía no tiene foto de evidencia.');
+
+        return Storage::disk('local')->response($anomalia->evidencia_url);
+    }
+
     // --------------------------------------------------
 
     private function administrador(Request $request)
@@ -112,7 +134,7 @@ class AnomaliaController extends Controller
             'origen'         => $a->origen,
             'fecha_hora'     => $a->fecha_hora?->toIso8601String(),
             'casillero'      => $a->casillero?->numero,
-            'evidencia_url'  => $a->evidencia_url,
+            'tiene_evidencia' => (bool) $a->evidencia_url,
             'accesos_id'     => $a->accesos_id,
             'revisada_por'   => $a->revisor
                 ? trim($a->revisor->nombre . ' ' . $a->revisor->apellido_pa)
