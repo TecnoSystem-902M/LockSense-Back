@@ -13,7 +13,7 @@ use App\Models\OrdenDispositivo;
 use App\Models\Rostro;
 use App\Models\Usuario;
 use App\Services\ClienteFacial;
-use App\Services\NotificadorSeguridad;
+use App\Services\RegistroAnomalias;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -91,7 +91,7 @@ class DispositivoController extends Controller
     ];
 
     public function __construct(
-        private NotificadorSeguridad $notificador,
+        private RegistroAnomalias $anomalias,
         private ClienteFacial $clienteFacial,
     ) {
     }
@@ -226,9 +226,9 @@ class DispositivoController extends Controller
             }
         }
 
-        // HU5: la puerta se abrio sin autorizacion -> notificar.
+        // HU5/HU7: la puerta se abrio sin autorizacion -> anomalia + notificacion.
         if ($tipo === 'apertura_no_autorizada') {
-            $this->notificador->aperturaNoAutorizada($dispositivo, $casillero);
+            $this->anomalias->aperturaNoAutorizada($dispositivo, $casillero);
         }
 
         return response()->json(['registrado' => true, 'evento_id' => $evento->id]);
@@ -541,7 +541,8 @@ class DispositivoController extends Controller
         $this->registrarEvento($dispositivo, 'bloqueo_activado',
             self::DESCRIPCIONES['bloqueo_activado'] . " Intentos: {$fallidos}.");
 
-        $this->notificador->intentosFallidos($dispositivo, $fallidos, self::DURACION_BLOQUEO);
+        // HU7: queda registrado como anomalia y se notifica.
+        $this->anomalias->intentosFallidos($dispositivo, $fallidos, self::DURACION_BLOQUEO);
 
         return $bloqueo;
     }
