@@ -46,6 +46,7 @@ return [
         'key' => env('FACE_SERVICE_API_KEY'),
         // Tiempo máximo de espera (segundos) al servicio Python.
         'timeout' => (int) env('FACE_SERVICE_TIMEOUT', 15),
+        'umbral' => env('FACE_MATCH_THRESHOLD', 0.45),
     ],
 
 ];

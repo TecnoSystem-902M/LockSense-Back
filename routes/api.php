@@ -55,5 +55,8 @@ Route::prefix('dispositivo')
         Route::post('/acceso', [DispositivoController::class, 'acceso']);
         Route::post('/evento', [DispositivoController::class, 'evento']);
         Route::get('/tarjetas', [DispositivoController::class, 'tarjetas']);
+
+        Route::post('/rostro', [DispositivoController::class, 'rostro']);    
+        Route::get('/ordenes', [DispositivoController::class, 'ordenes']);   
     });
 
