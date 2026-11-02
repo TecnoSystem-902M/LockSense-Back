@@ -9,6 +9,7 @@ use App\Models\Asignacion;
 use App\Models\Bloqueo;
 use App\Models\CredencialRfid;
 use App\Models\Dispositivo;
+use App\Models\Evidencia;
 use App\Models\EventoCasillero;
 use App\Models\OrdenDispositivo;
 use App\Models\Rostro;
@@ -19,8 +20,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
+
 
 /**
  * Endpoints que consumen los ESP32.
@@ -496,22 +496,29 @@ class DispositivoController extends Controller
             return response()->json(['guardada' => false, 'motivo' => 'anomalia_no_encontrada'], 422);
         }
 
-        // Se guarda en el disco privado (no publico): solo el administrador
-        // la puede ver con GET /api/anomalias/{id}/evidencia.
-        $ruta = $request->file('imagen')->storeAs(
-            'evidencias/' . now()->format('Y-m'),
-            'anomalia_' . $anomalia->id . '_' . Str::random(8) . '.jpg',
-            'local'
-        );
+        $imagen = $request->file('imagen');
+        $bytes  = file_get_contents($imagen->getRealPath());
 
-        DB::transaction(function () use ($anomalia, $orden, $ruta) {
-            // Si hubiera varias camaras, se queda la primera foto como evidencia principal.
+        // Se guarda en la base de datos (Render no conserva archivos).
+        // Solo el administrador la puede ver con GET /api/anomalias/{id}/evidencia.
+        DB::transaction(function () use ($anomalia, $orden, $imagen, $bytes) {
+            Evidencia::create([
+                'imagen_base64' => base64_encode($bytes),
+                'mime'          => $imagen->getMimeType() ?: 'image/jpeg',
+                'tamano_bytes'  => strlen($bytes),
+                'created_at'    => now(),
+                'anomalias_id'  => $anomalia->id,
+            ]);
+
             if (! $anomalia->evidencia_url) {
-                $anomalia->update(['evidencia_url' => $ruta]);
+                $anomalia->update(['evidencia_url' => "/api/anomalias/{$anomalia->id}/evidencia"]);
             }
 
             $orden->update(['estado' => OrdenDispositivo::COMPLETADA]);
         });
+
+        // Retencion: las fotos de mas de 30 dias se borran solas.
+        Evidencia::borrarVencidas();
 
         // Paso 4 (YOLO): aqui se analizara la foto.
 

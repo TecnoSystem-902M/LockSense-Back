@@ -5,9 +5,9 @@ namespace App\Http\Controllers;
 use App\Models\Anomalia;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
+use App\Models\Evidencia;
+use Illuminate\Http\Response;
 use Illuminate\Validation\Rule;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * HU7: consulta y revision de anomalias (panel del ADMINISTRADOR).
@@ -37,6 +37,7 @@ class AnomaliaController extends Controller
         ]);
 
         $anomalias = Anomalia::with(['casillero:id,numero', 'revisor:id,nombre,apellido_pa'])
+            ->withExists('evidencias')
             ->where('organizaciones_id', $usuario->organizaciones_id)
             ->when($filtros['estado'] ?? null, fn ($q, $v) => $q->where('estado', $v))
             ->when($filtros['tipo'] ?? null, fn ($q, $v) => $q->where('tipo', $v))
@@ -92,22 +93,29 @@ class AnomaliaController extends Controller
     }
 
     /**
-     * Devuelve la foto de evidencia. Esta guardada en el disco privado, asi
-     * que solo se puede ver con el token del administrador.
+     * Devuelve la foto de evidencia (guardada en la base de datos).
+     * Solo se puede ver con el token del administrador.
      * (En React: pedirla con axios responseType 'blob' y mostrarla con
      *  URL.createObjectURL.)
      */
-    public function evidencia(Request $request, int $id): StreamedResponse
+    public function evidencia(Request $request, int $id): Response
     {
         $usuario = $this->administrador($request);
 
         $anomalia = Anomalia::where('organizaciones_id', $usuario->organizaciones_id)
             ->findOrFail($id);
 
-        abort_unless($anomalia->evidencia_url && Storage::disk('local')->exists($anomalia->evidencia_url),
-            404, 'Esta anomalía no tiene foto de evidencia.');
+        $evidencia = Evidencia::where('anomalias_id', $anomalia->id)
+            ->orderBy('id')
+            ->first();
 
-        return Storage::disk('local')->response($anomalia->evidencia_url);
+        abort_unless($evidencia, 404, 'Esta anomalía no tiene foto de evidencia '
+            . '(o ya se borró por tener más de ' . Evidencia::DIAS_RETENCION . ' días).');
+
+        return response(base64_decode($evidencia->imagen_base64), 200, [
+            'Content-Type'  => $evidencia->mime,
+            'Cache-Control' => 'private, max-age=3600',
+        ]);
     }
 
     // --------------------------------------------------
@@ -134,7 +142,7 @@ class AnomaliaController extends Controller
             'origen'         => $a->origen,
             'fecha_hora'     => $a->fecha_hora?->toIso8601String(),
             'casillero'      => $a->casillero?->numero,
-            'tiene_evidencia' => (bool) $a->evidencia_url,
+            'tiene_evidencia' => (bool) ($a->evidencias_exists ?? $a->evidencias()->exists()),
             'accesos_id'     => $a->accesos_id,
             'revisada_por'   => $a->revisor
                 ? trim($a->revisor->nombre . ' ' . $a->revisor->apellido_pa)

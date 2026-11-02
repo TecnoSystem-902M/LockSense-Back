@@ -92,6 +92,11 @@ class Anomalia extends Model
         return $this->hasMany(Notificacion::class, 'anomalias_id');
     }
 
+    public function evidencias()
+    {
+        return $this->hasMany(Evidencia::class, 'anomalias_id');
+    }
+
     public function scopePendientes($query)
     {
         return $query->where('estado', self::PENDIENTE);

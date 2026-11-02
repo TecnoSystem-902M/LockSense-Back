@@ -53,6 +53,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/anomalias', [AnomaliaController::class, 'index']);
     Route::get('/anomalias/resumen', [AnomaliaController::class, 'resumen']);
     Route::patch('/anomalias/{id}/estado', [AnomaliaController::class, 'actualizarEstado']);
+    Route::get('/anomalias/{id}/evidencia', [AnomaliaController::class, 'evidencia']);   // NUEVA
 });
 
 Route::prefix('dispositivo')
@@ -65,4 +66,7 @@ Route::prefix('dispositivo')
         // HU2: acceso facial
         Route::post('/rostro', [DispositivoController::class, 'rostro']);
         Route::get('/ordenes', [DispositivoController::class, 'ordenes']);
+
+        // HU7: foto de evidencia de anomalías (ESP32-CAM)
+        Route::post('/evidencia', [DispositivoController::class, 'evidencia']);          // NUEVA
     });
