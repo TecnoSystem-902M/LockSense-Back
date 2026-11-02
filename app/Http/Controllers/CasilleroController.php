@@ -86,7 +86,6 @@ class CasilleroController extends Controller
             'id'                => $c->id,
             'numero'            => $c->numero,
             'estado'            => $c->estado,
-            'ubicacion'         => $c->ubicacion,
             'organizaciones_id' => $c->organizaciones_id,
             'ocupado'           => $asignacion !== null,
             'bloqueado'         => $bloqueo !== null,
@@ -259,6 +258,13 @@ class CasilleroController extends Controller
             ->where('roles_id', Rol::USUARIO)
             ->where('organizaciones_id', $casillero->organizaciones_id)
             ->where('id', '!=', $user->id)
+            // Un usuario solo puede tener un casillero activo
+            ->whereNotExists(function ($q) {
+                $q->selectRaw(1)
+                    ->from('asignaciones')
+                    ->whereColumn('asignaciones.usuarios_id', 'usuarios.id')
+                    ->where('asignaciones.estado', 'A');
+            })
             ->orderBy('id')
             ->get(['id', 'nombre', 'apellido_pa', 'apellido_ma', 'email']);
 
@@ -309,6 +315,23 @@ class CasilleroController extends Controller
             ], 422);
         }
 
+        // Un usuario solo puede tener un casillero activo
+        $casilleroActual = Asignacion::query()
+            ->with('casillero')
+            ->where('usuarios_id', $objetivo->id)
+            ->where('estado', 'A')
+            ->first();
+
+        if ($casilleroActual) {
+            $numero = $casilleroActual->casillero?->numero;
+
+            return response()->json([
+                'message' => $numero
+                    ? "Este usuario ya tiene asignado el casillero {$numero}. Libéralo antes de asignarle otro."
+                    : 'Este usuario ya tiene un casillero asignado. Libéralo antes de asignarle otro.',
+            ], 409);
+        }
+
         $uid = null;
         if ($request->filled('uid_rfid')) {
             $uid = strtoupper(str_replace([':', ' ', '-'], '', $request->uid_rfid));
@@ -339,6 +362,16 @@ class CasilleroController extends Controller
 
                 if ($yaAsignado) {
                     throw new \RuntimeException('CASILLERO_OCUPADO');
+                }
+
+                $usuarioYaTieneCasillero = Asignacion::query()
+                    ->where('usuarios_id', $objetivo->id)
+                    ->where('estado', 'A')
+                    ->lockForUpdate()
+                    ->exists();
+
+                if ($usuarioYaTieneCasillero) {
+                    throw new \RuntimeException('USUARIO_CON_CASILLERO');
                 }
 
                 Asignacion::query()->create([
@@ -372,6 +405,11 @@ class CasilleroController extends Controller
             if ($e->getMessage() === 'CASILLERO_OCUPADO') {
                 return response()->json([
                     'message' => 'El casillero ya tiene una asignación activa.',
+                ], 409);
+            }
+            if ($e->getMessage() === 'USUARIO_CON_CASILLERO') {
+                return response()->json([
+                    'message' => 'Este usuario ya tiene un casillero asignado. Libéralo antes de asignarle otro.',
                 ], 409);
             }
             throw $e;
@@ -445,6 +483,29 @@ class CasilleroController extends Controller
                     'descripcion'   => 'Liberación del usuario '.$activa->usuarios_id,
                     'fecha_hora'    => now(),
                 ]);
+
+                // El bloqueo ADMINISTRATIVO es contra el usuario asignado:
+                // al liberar el casillero ya no aplica y se termina.
+                // El bloqueo por MANTENIMIENTO es del casillero físico y se conserva.
+                $bloqueosAdministrativos = Bloqueo::query()
+                    ->where('casilleros_id', $casillero->id)
+                    ->where('activo', 'A')
+                    ->where('tipo', Casillero::MOTIVO_ADMINISTRATIVO)
+                    ->lockForUpdate()
+                    ->get();
+
+                foreach ($bloqueosAdministrativos as $bloqueo) {
+                    $bloqueo->activo = 'I';
+                    $bloqueo->fin = now();
+                    $bloqueo->save();
+
+                    EventoCasillero::query()->create([
+                        'casilleros_id' => $casillero->id,
+                        'tipo_evento'   => 'DESBLOQUEO',
+                        'descripcion'   => 'Desbloqueo automático al liberar el casillero',
+                        'fecha_hora'    => now(),
+                    ]);
+                }
             });
         } catch (\RuntimeException $e) {
             if ($e->getMessage() === 'SIN_ASIGNACION_ACTIVA') {

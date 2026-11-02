@@ -5,23 +5,70 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Controller;
 use App\Models\Acceso;
 use App\Models\Asignacion;
+use App\Models\Bloqueo;
 use App\Models\CredencialRfid;
 use App\Models\Dispositivo;
 use App\Models\EventoCasillero;
+use App\Models\OrdenDispositivo;
+use App\Models\Rostro;
+use App\Models\Usuario;
+use App\Services\ClienteFacial;
+use App\Services\NotificadorSeguridad;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 /**
- * Endpoints que consume el ESP32 (HU6: registro de accesos y eventos).
+ * Endpoints que consumen los ESP32.
  *
- *   POST /api/dispositivo/acceso    Valida una tarjeta y registra el intento.
- *   POST /api/dispositivo/evento    Registra apertura/cierre de puerta y alertas.
+ *   POST /api/dispositivo/acceso    Valida una tarjeta y registra el intento (HU6).
+ *                                   Cuenta intentos fallidos y bloquea el lector (HU5).
+ *   POST /api/dispositivo/evento    Registra apertura/cierre de puerta y alertas (HU6, HU5).
  *   GET  /api/dispositivo/tarjetas  Lista de tarjetas para el modo sin conexion.
+ *
+ *   POST /api/dispositivo/rostro    (ESP32-CAM) Reconoce el rostro de la foto y, si
+ *                                   coincide, deja una orden de abrir (HU2).
+ *   GET  /api/dispositivo/ordenes   (ESP32 de cerraduras) Entrega las ordenes pendientes.
  */
 class DispositivoController extends Controller
 {
     private const CREDENCIAL_ACTIVA = 'A';
     private const ASIGNACION_ACTIVA = 'A';
+    private const ROSTRO_ACTIVO     = 'A';
+
+    // ---------- HU2: acceso facial ----------
+    private const METODO_FACIAL = 'facial';
+
+    // Similitud minima para considerar que es la misma persona.
+    // Se puede cambiar en el .env con FACE_MATCH_THRESHOLD.
+    private const UMBRAL_POR_DEFECTO = 0.45;
+
+    // Segundos que la orden de abrir sigue siendo valida.
+    private const VIGENCIA_ORDEN_SEGUNDOS = 15;
+
+    // Errores del servidor (no de la foto): no se registran como intento.
+    private const ERRORES_DE_SERVICIO = [
+        'servicio_no_configurado',
+        'servicio_no_disponible',
+        'respuesta_invalida',
+    ];
+
+    // ---------- HU5: bloqueo del lector por intentos fallidos ----------
+    private const MAX_INTENTOS_FALLIDOS = 5;    // intentos para bloquear
+    private const VENTANA_SEGUNDOS      = 120;  // ...dentro de este tiempo
+    private const DURACION_BLOQUEO      = 30;   // segundos que dura el bloqueo
+    private const TIPO_BLOQUEO_LECTOR   = 'INTENTOS_FALLIDOS';
+
+    // Solo estos motivos cuentan como intento sospechoso.
+    // (Un casillero bloqueado por el administrador no cuenta.)
+    // (Una foto mal tomada -sin rostro, borrosa- tampoco cuenta.)
+    private const MOTIVOS_QUE_CUENTAN = [
+        'tarjeta_no_registrada',
+        'tarjeta_inactiva',
+        'sin_casillero_asignado',
+        'rostro_no_reconocido',
+    ];
 
     private const EVENTOS_VALIDOS = [
         'puerta_abierta',
@@ -43,9 +90,20 @@ class DispositivoController extends Controller
         'intento_durante_bloqueo' => 'Se presentó una tarjeta mientras el lector estaba bloqueado.',
     ];
 
+    public function __construct(
+        private NotificadorSeguridad $notificador,
+        private ClienteFacial $clienteFacial,
+    ) {
+    }
+
     /**
      * POST /api/dispositivo/acceso
      * Body: { "uid": "D9 94 15 E6", "metodo": "rfid" }
+     *
+     * Respuestas:
+     *   { "permitido": true,  "posicion": 1, "acceso_id": 25 }
+     *   { "permitido": false, "motivo": "...", "acceso_id": 26 }
+     *   { "permitido": false, "motivo": "...", "acceso_id": 27, "bloqueado": true, "segundos_restantes": 30 }
      */
     public function acceso(Request $request): JsonResponse
     {
@@ -58,6 +116,13 @@ class DispositivoController extends Controller
         $dispositivo = $request->attributes->get('dispositivo');
         $uid = $this->normalizarUid($data['uid']);
         $metodo = $data['metodo'] ?? 'rfid';
+
+        // HU5: si el lector esta bloqueado, no se valida la tarjeta.
+        if ($bloqueo = $this->bloqueoLectorActivo($dispositivo)) {
+            $acceso = $this->registrarDenegado($dispositivo, $uid, $metodo, 'lector_bloqueado');
+
+            return $this->respuestaDenegado($acceso, $bloqueo);
+        }
 
         $credencial = CredencialRfid::whereRaw(
             "REPLACE(UPPER(codigo), ' ', '') = ?",
@@ -139,17 +204,17 @@ class DispositivoController extends Controller
             $descripcion .= ' UID: ' . $this->normalizarUid($data['uid']) . '.';
         }
 
-        $evento = EventoCasillero::create([
-            'tipo_evento'     => strtoupper($tipo),
-            'descripcion'     => mb_substr($descripcion, 0, 255),
-            'fecha_hora'      => now(),
-            'casilleros_id'   => $casillero?->id,
-            'dispositivos_id' => $dispositivo->id,
-        ]);
+        $evento = $this->registrarEvento($dispositivo, $tipo, $descripcion, $casillero?->id);
 
         // Completar el acceso con apertura, cierre y duracion.
+        // El acceso puede ser de este ESP32 (tarjeta) o de la camara (rostro)
+        // sobre un casillero de este ESP32.
         if (! empty($data['acceso_id'])) {
-            $acceso = $dispositivo->accesos()->find($data['acceso_id']);
+            $acceso = Acceso::where('id', $data['acceso_id'])
+                ->where(fn ($q) => $q
+                    ->where('dispositivos_id', $dispositivo->id)
+                    ->orWhereIn('casilleros_id', $dispositivo->casilleros()->select('id')))
+                ->first();
 
             if ($acceso && $tipo === 'puerta_abierta') {
                 $acceso->update(['fecha_apertura' => now()]);
@@ -159,6 +224,11 @@ class DispositivoController extends Controller
                     'duracion_segundos' => $data['duracion_segundos'] ?? null,
                 ]);
             }
+        }
+
+        // HU5: la puerta se abrio sin autorizacion -> notificar.
+        if ($tipo === 'apertura_no_autorizada') {
+            $this->notificador->aperturaNoAutorizada($dispositivo, $casillero);
         }
 
         return response()->json(['registrado' => true, 'evento_id' => $evento->id]);
@@ -195,13 +265,307 @@ class DispositivoController extends Controller
     }
 
     // ==================================================
+    // HU2: acceso por reconocimiento facial
+    // ==================================================
+
+    /**
+     * POST /api/dispositivo/rostro   (lo llama la ESP32-CAM)
+     * multipart/form-data, campo `imagen` (JPG)
+     *
+     * Respuestas:
+     *   { "permitido": true,  "posicion": 1, "acceso_id": 70 }
+     *   { "permitido": false, "motivo": "rostro_no_reconocido", "acceso_id": 71 }
+     *   { "permitido": false, "motivo": "...", "acceso_id": 72, "bloqueado": true, "segundos_restantes": 30 }
+     *   { "permitido": false, "motivo": "servicio_no_disponible" }   (HTTP 503)
+     */
+    public function rostro(Request $request): JsonResponse
+    {
+        $request->validate([
+            'imagen' => ['required', 'file', 'image', 'mimes:jpg,jpeg,png', 'max:8192'],
+        ]);
+
+        /** @var Dispositivo $camara */
+        $camara = $request->attributes->get('dispositivo');
+        $metodo = self::METODO_FACIAL;
+
+        // HU5: si la camara esta bloqueada por intentos fallidos, no se analiza.
+        if ($bloqueo = $this->bloqueoLectorActivo($camara)) {
+            $acceso = $this->registrarDenegado($camara, '', $metodo, 'lector_bloqueado');
+
+            return $this->respuestaDenegado($acceso, $bloqueo);
+        }
+
+        // 1) Embedding de la foto (servicio Python).
+        $resultado = $this->clienteFacial->obtenerEmbedding($request->file('imagen'));
+
+        if (! $resultado['ok']) {
+            // Falla del servidor: no es culpa de quien esta frente a la camara.
+            if (in_array($resultado['code'], self::ERRORES_DE_SERVICIO, true)) {
+                return response()->json([
+                    'permitido' => false,
+                    'motivo'    => $resultado['code'],
+                ], 503);
+            }
+
+            // Foto sin rostro, con dos rostros, etc.: se registra, pero no cuenta
+            // como intento sospechoso.
+            $acceso = $this->registrarDenegado($camara, '', $metodo, $resultado['code']);
+
+            return $this->respuestaDenegado($acceso, null);
+        }
+
+        // 2) Comparar contra los rostros registrados de la organizacion.
+        [$usuarioId, $similitud] = $this->buscarRostroMasParecido(
+            $camara,
+            $resultado['embedding'],
+            $resultado['modelo']
+        );
+
+        // Se guarda la similitud para poder revisar y ajustar el umbral.
+        $lectura = 'SIM ' . number_format($similitud, 4, '.', '');
+
+        if ($usuarioId === null || $similitud < $this->umbral()) {
+            return $this->denegar($camara, $lectura, $metodo, 'rostro_no_reconocido');
+        }
+
+        // 3) Casillero asignado al usuario reconocido (con cerradura conectada).
+        $asignacion = Asignacion::with('casillero')
+            ->where('usuarios_id', $usuarioId)
+            ->where('estado', self::ASIGNACION_ACTIVA)
+            ->whereHas('casillero', fn ($q) => $q
+                ->where('organizaciones_id', $camara->organizaciones_id)
+                ->whereNotNull('dispositivos_id'))
+            ->latest('id')
+            ->first();
+
+        if (! $asignacion) {
+            return $this->denegar($camara, $lectura, $metodo, 'sin_casillero_asignado', $usuarioId);
+        }
+
+        $casillero = $asignacion->casillero;
+
+        if ($casillero->estaBloqueado()) {
+            return $this->denegar($camara, $lectura, $metodo, 'casillero_bloqueado',
+                $usuarioId, $casillero->id);
+        }
+
+        // 4) Registrar el acceso y dejar la orden de abrir para el ESP32 de la cerradura.
+        $acceso = DB::transaction(function () use ($camara, $casillero, $usuarioId, $lectura, $metodo) {
+            $acceso = Acceso::create([
+                'metodo'          => $metodo,
+                'resultado'       => Acceso::AUTORIZADO,
+                'fecha_hora'      => now(),
+                'casilleros_id'   => $casillero->id,
+                'usuarios_id'     => $usuarioId,
+                'dispositivos_id' => $camara->id,
+                'codigo_leido'    => $lectura,
+            ]);
+
+            OrdenDispositivo::create([
+                'tipo'            => OrdenDispositivo::TIPO_ABRIR,
+                'posicion'        => $casillero->posicion,
+                'estado'          => OrdenDispositivo::PENDIENTE,
+                'expira_en'       => now()->addSeconds(self::VIGENCIA_ORDEN_SEGUNDOS),
+                'dispositivos_id' => $casillero->dispositivos_id,
+                'casilleros_id'   => $casillero->id,
+                'accesos_id'      => $acceso->id,
+            ]);
+
+            return $acceso;
+        });
+
+        return response()->json([
+            'permitido' => true,
+            'posicion'  => $casillero->posicion,
+            'acceso_id' => $acceso->id,
+        ]);
+    }
+
+    /**
+     * GET /api/dispositivo/ordenes   (lo llama el ESP32 de las cerraduras cada segundo)
+     *
+     * Respuesta:
+     *   { "ordenes": [ { "id": 5, "tipo": "ABRIR", "posicion": 1, "acceso_id": 70 } ] }
+     *   { "ordenes": [] }
+     *
+     * Cada orden se entrega una sola vez.
+     */
+    public function ordenes(Request $request): JsonResponse
+    {
+        /** @var Dispositivo $dispositivo */
+        $dispositivo = $request->attributes->get('dispositivo');
+
+        $ordenes = DB::transaction(function () use ($dispositivo) {
+            // Las que ya vencieron no se entregan.
+            OrdenDispositivo::where('dispositivos_id', $dispositivo->id)
+                ->where('estado', OrdenDispositivo::PENDIENTE)
+                ->where('expira_en', '<=', now())
+                ->update(['estado' => OrdenDispositivo::EXPIRADA, 'updated_at' => now()]);
+
+            $pendientes = OrdenDispositivo::where('dispositivos_id', $dispositivo->id)
+                ->where('estado', OrdenDispositivo::PENDIENTE)
+                ->where('expira_en', '>', now())
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+            if ($pendientes->isNotEmpty()) {
+                OrdenDispositivo::whereIn('id', $pendientes->pluck('id'))->update([
+                    'estado'       => OrdenDispositivo::ENTREGADA,
+                    'entregada_en' => now(),
+                    'updated_at'   => now(),
+                ]);
+            }
+
+            return $pendientes;
+        });
+
+        return response()->json([
+            'ordenes' => $ordenes->map(fn (OrdenDispositivo $orden) => [
+                'id'        => $orden->id,
+                'tipo'      => $orden->tipo,
+                'posicion'  => $orden->posicion,
+                'acceso_id' => $orden->accesos_id,
+            ])->values(),
+        ]);
+    }
+
+    /**
+     * Compara el embedding con los rostros activos de la organizacion de la camara.
+     * Devuelve [usuarios_id del mas parecido, similitud]; [null, -1] si no hay rostros.
+     */
+    private function buscarRostroMasParecido(Dispositivo $camara, array $embedding, string $modelo): array
+    {
+        $rostros = Rostro::query()
+            ->where('estado', self::ROSTRO_ACTIVO)
+            ->where('modelo', $modelo)   // solo se comparan vectores del mismo modelo
+            ->whereIn('usuarios_id', Usuario::query()
+                ->select('id')
+                ->where('organizaciones_id', $camara->organizaciones_id))
+            ->get(['usuarios_id', 'embedding']);
+
+        $mejorUsuario = null;
+        $mejorSimilitud = -1.0;
+
+        foreach ($rostros as $rostro) {
+            $guardado = json_decode((string) $rostro->embedding, true);
+
+            if (! is_array($guardado)) {
+                continue;
+            }
+
+            $similitud = $this->clienteFacial->similitud($embedding, $guardado);
+
+            if ($similitud > $mejorSimilitud) {
+                $mejorSimilitud = $similitud;
+                $mejorUsuario = (int) $rostro->usuarios_id;
+            }
+        }
+
+        return [$mejorUsuario, $mejorSimilitud];
+    }
+
+    private function umbral(): float
+    {
+        return (float) config('services.face.umbral', self::UMBRAL_POR_DEFECTO);
+    }
+
+    // ==================================================
+    // HU5: bloqueo del lector
+    // ==================================================
+
+    /**
+     * Bloqueo del lector vigente, o null. Si ya vencio, lo desactiva.
+     */
+    private function bloqueoLectorActivo(Dispositivo $dispositivo): ?Bloqueo
+    {
+        $bloqueo = Bloqueo::where('dispositivos_id', $dispositivo->id)
+            ->whereNull('casilleros_id')
+            ->where('tipo', self::TIPO_BLOQUEO_LECTOR)
+            ->where('activo', 'A')
+            ->latest('id')
+            ->first();
+
+        if (! $bloqueo) {
+            return null;
+        }
+
+        if (Carbon::parse($bloqueo->fin)->isPast()) {
+            $bloqueo->update(['activo' => 'I']);
+            $this->registrarEvento($dispositivo, 'bloqueo_finalizado', self::DESCRIPCIONES['bloqueo_finalizado']);
+
+            return null;
+        }
+
+        return $bloqueo;
+    }
+
+    /**
+     * Cuenta los intentos fallidos recientes y, si se alcanza el limite,
+     * crea el bloqueo del lector y notifica a los administradores.
+     */
+    private function evaluarBloqueo(Dispositivo $dispositivo): ?Bloqueo
+    {
+        $desde = now()->subSeconds(self::VENTANA_SEGUNDOS);
+
+        // No volver a contar intentos de antes del ultimo bloqueo.
+        $finUltimoBloqueo = Bloqueo::where('dispositivos_id', $dispositivo->id)
+            ->where('tipo', self::TIPO_BLOQUEO_LECTOR)
+            ->max('fin');
+
+        if ($finUltimoBloqueo && Carbon::parse($finUltimoBloqueo)->greaterThan($desde)) {
+            $desde = Carbon::parse($finUltimoBloqueo);
+        }
+
+        $fallidos = $dispositivo->accesos()
+            ->where('resultado', Acceso::DENEGADO)
+            ->whereIn('motivo', self::MOTIVOS_QUE_CUENTAN)
+            ->where('fecha_hora', '>', $desde)
+            ->count();
+
+        if ($fallidos < self::MAX_INTENTOS_FALLIDOS) {
+            return null;
+        }
+
+        $bloqueo = Bloqueo::create([
+            'tipo'            => self::TIPO_BLOQUEO_LECTOR,
+            'motivo'          => "{$fallidos} intentos de acceso fallidos en menos de "
+                               . self::VENTANA_SEGUNDOS . ' segundos.',
+            'inicio'          => now(),
+            'fin'             => now()->addSeconds(self::DURACION_BLOQUEO),
+            'activo'          => 'A',
+            'casilleros_id'   => null,
+            'dispositivos_id' => $dispositivo->id,
+        ]);
+
+        $this->registrarEvento($dispositivo, 'bloqueo_activado',
+            self::DESCRIPCIONES['bloqueo_activado'] . " Intentos: {$fallidos}.");
+
+        $this->notificador->intentosFallidos($dispositivo, $fallidos, self::DURACION_BLOQUEO);
+
+        return $bloqueo;
+    }
+
+    // ==================================================
     // Auxiliares
     // ==================================================
 
     private function denegar(Dispositivo $dispositivo, string $uid, string $metodo, string $motivo,
                              ?int $usuarioId = null, ?int $casilleroId = null): JsonResponse
     {
-        $acceso = Acceso::create([
+        $acceso = $this->registrarDenegado($dispositivo, $uid, $metodo, $motivo, $usuarioId, $casilleroId);
+
+        $bloqueo = in_array($motivo, self::MOTIVOS_QUE_CUENTAN, true)
+            ? $this->evaluarBloqueo($dispositivo)
+            : null;
+
+        return $this->respuestaDenegado($acceso, $bloqueo);
+    }
+
+    private function registrarDenegado(Dispositivo $dispositivo, string $uid, string $metodo, string $motivo,
+                                       ?int $usuarioId = null, ?int $casilleroId = null): Acceso
+    {
+        return Acceso::create([
             'metodo'          => $metodo,
             'resultado'       => Acceso::DENEGADO,
             'motivo'          => $motivo,
@@ -211,11 +575,35 @@ class DispositivoController extends Controller
             'dispositivos_id' => $dispositivo->id,
             'codigo_leido'    => $uid,
         ]);
+    }
 
-        return response()->json([
+    private function respuestaDenegado(Acceso $acceso, ?Bloqueo $bloqueo): JsonResponse
+    {
+        $respuesta = [
             'permitido' => false,
-            'motivo'    => $motivo,
+            'motivo'    => $acceso->motivo,
             'acceso_id' => $acceso->id,
+        ];
+
+        if ($bloqueo) {
+            $respuesta['bloqueado'] = true;
+            $respuesta['segundos_restantes'] = max(1, (int) ceil(
+                now()->diffInSeconds(Carbon::parse($bloqueo->fin), false)
+            ));
+        }
+
+        return response()->json($respuesta);
+    }
+
+    private function registrarEvento(Dispositivo $dispositivo, string $tipo, string $descripcion,
+                                     ?int $casilleroId = null): EventoCasillero
+    {
+        return EventoCasillero::create([
+            'tipo_evento'     => strtoupper($tipo),
+            'descripcion'     => mb_substr($descripcion, 0, 255),
+            'fecha_hora'      => now(),
+            'casilleros_id'   => $casilleroId,
+            'dispositivos_id' => $dispositivo->id,
         ]);
     }
 

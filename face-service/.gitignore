@@ -1,0 +1,22 @@
+# Entorno virtual de Python (no se publica; se recrea con requirements.txt)
+.venv/
+venv/
+env/
+
+# Variables de entorno reales (usar .env.example como plantilla)
+.env
+.env.*
+!.env.example
+
+# Cachés y archivos compilados de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Modelos descargados por InsightFace (se descargan en runtime)
+*.onnx
+
+# Logs y temporales
+*.log
+*.tmp
