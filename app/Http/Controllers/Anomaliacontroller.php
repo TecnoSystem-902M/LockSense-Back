@@ -10,18 +10,24 @@ use Illuminate\Http\Response;
 use Illuminate\Validation\Rule;
 
 /**
- * HU7: consulta y revision de anomalias (panel del ADMINISTRADOR).
+ * HU7: consulta de anomalias.
  *
+ * ADMINISTRADOR (sin fotos; solo para supervisar el sistema):
  *   GET   /api/anomalias              Lista (filtros: estado, tipo, nivel_riesgo, desde, hasta)
  *   GET   /api/anomalias/resumen      Conteos para el dashboard
  *   PATCH /api/anomalias/{id}/estado  Marcar como revisada o descartada
- *   GET   /api/anomalias/{id}/evidencia  Foto de evidencia (imagen JPG)
  *
- * Cada administrador solo ve las anomalias de su organizacion.
+ * USUARIO (dueno del casillero):
+ *   GET   /api/mis-anomalias                 Anomalias de su casillero
+ *   GET   /api/mis-anomalias/{id}/evidencia  Foto de evidencia (imagen JPG)
+ *
+ * El administrador solo ve las de su organizacion; el usuario solo las suyas.
+ * La foto SOLO la puede ver el dueno del casillero.
  */
 class AnomaliaController extends Controller
 {
     private const ROL_ADMINISTRADOR = 2;
+    private const ROL_USUARIO       = 3;
 
     public function index(Request $request): JsonResponse
     {
@@ -37,7 +43,6 @@ class AnomaliaController extends Controller
         ]);
 
         $anomalias = Anomalia::with(['casillero:id,numero', 'revisor:id,nombre,apellido_pa'])
-            ->withExists('evidencias')
             ->where('organizaciones_id', $usuario->organizaciones_id)
             ->when($filtros['estado'] ?? null, fn ($q, $v) => $q->where('estado', $v))
             ->when($filtros['tipo'] ?? null, fn ($q, $v) => $q->where('tipo', $v))
@@ -92,18 +97,37 @@ class AnomaliaController extends Controller
         ]);
     }
 
+    // ==================================================
+    // USUARIO: anomalias de su casillero
+    // ==================================================
+
+    public function misAnomalias(Request $request): JsonResponse
+    {
+        $usuario = $this->usuario($request);
+
+        $anomalias = Anomalia::with('casillero:id,numero')
+            ->withExists('evidencias')
+            ->where('usuarios_id', $usuario->id)
+            ->orderByDesc('fecha_hora')
+            ->orderByDesc('id')
+            ->paginate((int) $request->query('por_pagina', 20));
+
+        $anomalias->getCollection()->transform(fn (Anomalia $a) => $this->formato($a, true));
+
+        return response()->json($anomalias);
+    }
+
     /**
-     * Devuelve la foto de evidencia (guardada en la base de datos).
-     * Solo se puede ver con el token del administrador.
+     * Foto de evidencia (guardada en la base de datos). Solo el dueno del
+     * casillero cuando ocurrio la anomalia la puede ver.
      * (En React: pedirla con axios responseType 'blob' y mostrarla con
      *  URL.createObjectURL.)
      */
-    public function evidencia(Request $request, int $id): Response
+    public function miEvidencia(Request $request, int $id): Response
     {
-        $usuario = $this->administrador($request);
+        $usuario = $this->usuario($request);
 
-        $anomalia = Anomalia::where('organizaciones_id', $usuario->organizaciones_id)
-            ->findOrFail($id);
+        $anomalia = Anomalia::where('usuarios_id', $usuario->id)->findOrFail($id);
 
         $evidencia = Evidencia::where('anomalias_id', $anomalia->id)
             ->orderBy('id')
@@ -130,7 +154,18 @@ class AnomaliaController extends Controller
         return $usuario;
     }
 
-    private function formato(Anomalia $a): array
+    private function usuario(Request $request)
+    {
+        $usuario = $request->user();
+
+        abort_unless((int) $usuario->roles_id === self::ROL_USUARIO, 403,
+            'Solo el usuario del casillero puede consultar sus anomalías.');
+
+        return $usuario;
+    }
+
+    /** $conEvidencia: solo el dueno del casillero sabe si hay foto. */
+    private function formato(Anomalia $a, bool $conEvidencia = false): array
     {
         return [
             'id'             => $a->id,
@@ -142,12 +177,13 @@ class AnomaliaController extends Controller
             'origen'         => $a->origen,
             'fecha_hora'     => $a->fecha_hora?->toIso8601String(),
             'casillero'      => $a->casillero?->numero,
-            'tiene_evidencia' => (bool) ($a->evidencias_exists ?? $a->evidencias()->exists()),
             'accesos_id'     => $a->accesos_id,
             'revisada_por'   => $a->revisor
                 ? trim($a->revisor->nombre . ' ' . $a->revisor->apellido_pa)
                 : null,
             'fecha_revision' => $a->fecha_revision?->toIso8601String(),
-        ];
+        ] + ($conEvidencia ? [
+            'tiene_evidencia' => (bool) ($a->evidencias_exists ?? $a->evidencias()->exists()),
+        ] : []);
     }
 }

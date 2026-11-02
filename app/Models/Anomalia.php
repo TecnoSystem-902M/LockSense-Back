@@ -54,6 +54,7 @@ class Anomalia extends Model
         'accesos_id',
         'revisada_por',
         'fecha_revision',
+        'usuarios_id',        // dueno del casillero cuando ocurrio
     ];
 
     protected $casts = [
@@ -80,6 +81,12 @@ class Anomalia extends Model
     public function organizacion()
     {
         return $this->belongsTo(Organizacion::class, 'organizaciones_id');
+    }
+
+    /** Dueno del casillero cuando ocurrio: recibe la alerta y ve la foto. */
+    public function dueno()
+    {
+        return $this->belongsTo(Usuario::class, 'usuarios_id');
     }
 
     public function revisor()

@@ -10,7 +10,7 @@ use App\Models\OrdenDispositivo;
 
 /**
  * HU7: registra anomalias en la tabla `anomalias` y genera la alerta
- * (notificacion a administradores y al dueno del casillero).
+ * (notificacion SOLO al dueno del casillero).
  *
  * Toda deteccion (sensores, YOLO, Isolation Forest) pasa por aqui, para que
  * todas queden guardadas igual y generen su notificacion.
@@ -46,7 +46,7 @@ class RegistroAnomalias
             'casilleros_id'   => $casillero?->id,
         ]);
 
-        $this->notificador->aperturaNoAutorizada($dispositivo, $casillero, $anomalia);
+        $this->notificador->anomalia($anomalia);
 
         return $anomalia;
     }
@@ -65,7 +65,8 @@ class RegistroAnomalias
             'casilleros_id'   => null,
         ]);
 
-        $this->notificador->intentosFallidos($dispositivo, $intentos, $segundosBloqueo, $anomalia);
+        // Sin casillero ni dueno: queda registrada, pero no se notifica a nadie.
+        $this->notificador->anomalia($anomalia);
 
         return $anomalia;
     }
@@ -132,6 +133,12 @@ class RegistroAnomalias
 
     private function crear(array $datos): Anomalia
     {
+        // Dueno del casillero en este momento: es quien recibe la alerta y ve la foto.
+        if (empty($datos['usuarios_id']) && ! empty($datos['casilleros_id'])) {
+            $datos['usuarios_id'] = Casillero::find($datos['casilleros_id'])
+                ?->asignacionActiva?->usuarios_id;
+        }
+
         $anomalia = Anomalia::create(array_merge([
             'estado'     => Anomalia::PENDIENTE,
             'fecha_hora' => now(),
