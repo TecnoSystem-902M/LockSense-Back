@@ -14,6 +14,7 @@ class Notificacion extends Model
     // Tipos de notificacion de seguridad
     const TIPO_INTENTOS_FALLIDOS      = 'INTENTOS_FALLIDOS';
     const TIPO_APERTURA_NO_AUTORIZADA = 'APERTURA_NO_AUTORIZADA';
+    const TIPO_ANOMALIA               = 'ANOMALIA';   // HU7: otras anomalias
 
     protected $fillable = [
         'tipo',
@@ -34,6 +35,11 @@ class Notificacion extends Model
     public function usuario()
     {
         return $this->belongsTo(Usuario::class, 'usuarios_id');
+    }
+
+    public function anomalia()
+    {
+        return $this->belongsTo(Anomalia::class, 'anomalias_id');
     }
 
     public function scopeNoLeidas($query)

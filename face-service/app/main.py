@@ -1,5 +1,6 @@
 """
-LockSense — Servicio de reconocimiento facial (embeddings).
+LockSense — Servicio de reconocimiento facial (embeddings) y deteccion de
+objetos con YOLO (HU7: evidencia de anomalias).
 
 Servicio independiente en FastAPI que recibe una imagen, detecta exactamente
 un rostro con InsightFace (modelo buffalo_l, CPUExecutionProvider) y devuelve
@@ -12,6 +13,9 @@ Contrato (verificado contra LockSense-Back/RostroController.php):
   - Error:  {"ok": false, "code": "<code>", "message": "..."}             (HTTP 4xx)
     Códigos que Laravel interpreta: invalid_image, no_face, multiple_faces,
     low_quality. Laravel lee el campo JSON `code`.
+
+HU7 — POST /v1/detect: detecta personas y objetos (YOLOv8n en ONNX) en la
+foto de evidencia de una anomalia. Ver app/yolo_detector.py.
 
 Privacidad: no se guardan imágenes ni se registran imágenes o embeddings en
 los logs; no se envía nada a servicios externos.
@@ -28,6 +32,11 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, Header, UploadFile, File
 from fastapi.responses import JSONResponse
+
+try:
+    from .yolo_detector import DetectorYolo, confianza_por_defecto, ruta_modelo_por_defecto
+except ImportError:  # si se ejecuta fuera del paquete app
+    from yolo_detector import DetectorYolo, confianza_por_defecto, ruta_modelo_por_defecto
 
 logger = logging.getLogger("face-service")
 
@@ -63,7 +72,7 @@ EMBEDDING_DIM = 512
 DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 # Estado del modelo cargado una sola vez al arrancar.
-_state: dict[str, object] = {"model": None, "model_name": None}
+_state: dict[str, object] = {"model": None, "model_name": None, "yolo": None}
 
 
 def _max_image_bytes() -> int:
@@ -98,11 +107,23 @@ async def lifespan(app: FastAPI):
     _state["model_name"] = nombre
     logger.info("Modelo facial inicializado (CPU).")
 
+    # HU7: detector de objetos YOLO (opcional). Si no existe el modelo, el
+    # servicio sigue funcionando para el reconocimiento facial.
+    ruta_yolo = ruta_modelo_por_defecto()
+    if os.path.exists(ruta_yolo):
+        try:
+            _state["yolo"] = DetectorYolo(ruta_yolo, confianza_por_defecto())
+        except Exception:
+            logger.error("No se pudo cargar el modelo YOLO.")
+    else:
+        logger.warning("Modelo YOLO no encontrado; /v1/detect no estará disponible.")
+
     try:
         yield
     finally:
         _state["model"] = None
         _state["model_name"] = None
+        _state["yolo"] = None
 
 
 app = FastAPI(title="LockSense Face Service", lifespan=lifespan)
@@ -127,6 +148,7 @@ async def health():
     return {
         "ok": True,
         "model_loaded": _state["model"] is not None,
+        "yolo_loaded": _state["yolo"] is not None,
     }
 
 
@@ -199,6 +221,64 @@ async def embed(
         "ok": True,
         "embedding": [float(x) for x in vector],
         "modelo": str(_state["model_name"] or _model_name()),
+    }
+
+
+@app.post("/v1/detect")
+async def detect(
+    image: UploadFile = File(...),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+):
+    """
+    HU7: detecta objetos en la foto de evidencia con YOLO.
+
+    Respuesta:
+      {"ok": true, "modelo": "yolov8n",
+       "personas": 2, "confianza_personas": 0.87,
+       "sospechosos": [{"clase": "knife", "nombre": "cuchillo", "confianza": 0.61}],
+       "detecciones": [{"clase": "person", "confianza": 0.87, "caja": [x1, y1, x2, y2]}, ...]}
+    """
+    # 1) Autenticación (igual que /v1/embed).
+    esperada = _api_key_configurada()
+    if esperada is None:
+        logger.error("FACE_SERVICE_API_KEY no está configurada; se rechaza la solicitud.")
+        return _error("unauthorized", "El servicio no está configurado para autenticar.", 503)
+
+    if not x_api_key or not _comparar_claves(x_api_key, esperada):
+        return _error("unauthorized", "Clave de API inválida o ausente.", 401)
+
+    # 2) Lectura y validación de la imagen.
+    contenido = await image.read()
+    if not contenido:
+        return _error("invalid_image", "No se recibió ninguna imagen.", 422)
+
+    if len(contenido) > _max_image_bytes():
+        return _error("invalid_image", "La imagen supera el tamaño máximo permitido.", 422)
+
+    try:
+        imagen = cv2.imdecode(np.frombuffer(contenido, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except Exception:
+        return _error("invalid_image", "No se pudo procesar la imagen.", 422)
+
+    if imagen is None or imagen.size == 0 or imagen.shape[0] < 1 or imagen.shape[1] < 1:
+        return _error("invalid_image", "La imagen no es válida.", 422)
+
+    # 3) Detección de objetos.
+    detector = _state.get("yolo")
+    if detector is None:
+        return _error("unavailable", "El detector de objetos no está disponible.", 503)
+
+    try:
+        detecciones = detector.detectar(imagen)
+    except Exception:
+        logger.error("Fallo durante la detección de objetos.")
+        return _error("invalid_image", "No se pudo analizar la imagen.", 422)
+
+    return {
+        "ok": True,
+        "modelo": detector.nombre_modelo,
+        **DetectorYolo.resumir(detecciones),
+        "detecciones": detecciones,
     }
 
 
