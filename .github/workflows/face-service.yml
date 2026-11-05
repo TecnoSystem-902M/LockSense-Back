@@ -1,0 +1,42 @@
+# LockSense - construye la imagen Docker del servicio facial y la sube a GitHub (ghcr.io)
+name: Imagen face-service
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'face-service/**'
+  workflow_dispatch:   # permite correrlo a mano desde la pestaña Actions
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  construir:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: Nombre de la imagen en minusculas
+        run: echo "IMAGEN=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/locksense-face" >> "$GITHUB_ENV"
+
+      - name: Iniciar sesion en ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construir y subir la imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: ./face-service
+          push: true
+          tags: |
+            ${{ env.IMAGEN }}:latest
+            ${{ env.IMAGEN }}:${{ github.sha }}
+
+      - name: Mostrar el nombre de la imagen
+        run: echo "Imagen lista -> ${IMAGEN}:latest"

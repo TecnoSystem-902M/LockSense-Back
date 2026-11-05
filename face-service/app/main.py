@@ -99,7 +99,13 @@ async def lifespan(app: FastAPI):
     from insightface.app import FaceAnalysis
 
     nombre = _model_name()
-    modelo = FaceAnalysis(name=nombre, providers=["CPUExecutionProvider"])
+    # Solo se cargan deteccion y reconocimiento (no edad/genero ni puntos 3D):
+    # asi usa mucha menos memoria (importante en Render).
+    modelo = FaceAnalysis(
+        name=nombre,
+        providers=["CPUExecutionProvider"],
+        allowed_modules=["detection", "recognition"],
+    )
     # ctx_id=-1 fuerza CPU; det_size estándar de InsightFace.
     modelo.prepare(ctx_id=-1, det_size=(640, 640))
 
