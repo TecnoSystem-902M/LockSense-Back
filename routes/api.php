@@ -6,6 +6,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\UsuarioController;
 use App\Http\Controllers\CasilleroController;
 use App\Http\Controllers\DispositivoController;
+use App\Http\Controllers\PanelUsuarioController;
 use App\Http\Controllers\RostroController;
 use App\Http\Middleware\AutenticarDispositivo;
 use Illuminate\Support\Facades\Route;
@@ -47,6 +48,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/mis-anomalias', [AnomaliaController::class, 'misAnomalias']);
     Route::get('/mis-anomalias/{id}/evidencia', [AnomaliaController::class, 'miEvidencia']);
+
+    Route::get('/usuario/dashboard', [PanelUsuarioController::class, 'resumen']);
+    Route::get('/usuario/casillero', [PanelUsuarioController::class, 'casillero']);
+    Route::get('/usuario/actividad', [PanelUsuarioController::class, 'actividad']);
 });
 
 Route::prefix('dispositivo')
