@@ -176,6 +176,58 @@ class ClienteFacial
         ];
     }
 
+    /**
+     * HU7: ¿el acceso actual es inusual para ese usuario? (Isolation Forest)
+     *
+     * $historial y $actual: [['hora' => 8.5, 'dia_semana' => 1, 'accesos_dia' => 1, 'fallidos_previos' => 0], ...]
+     *
+     * Éxito: ['ok' => true, 'evaluado' => true, 'anomalo' => true, 'confianza' => 0.93, 'motivos' => [...]]
+     *        ['ok' => true, 'evaluado' => false]   (historial insuficiente)
+     * Error: ['ok' => false, 'code' => '...']
+     *
+     * Usa un tiempo de espera corto: si el servicio está dormido, simplemente
+     * no se evalúa ese acceso (no debe retrasar la apertura del casillero).
+     */
+    public function analizarPatron(array $historial, array $actual): array
+    {
+        $url = config('services.face.url');
+        $key = config('services.face.key');
+
+        if (empty($url) || empty($key)) {
+            return ['ok' => false, 'code' => 'servicio_no_configurado'];
+        }
+
+        try {
+            $respuesta = Http::timeout((int) config('services.face.timeout_patrones', 5))
+                ->withHeaders(['X-API-Key' => $key])
+                ->acceptJson()
+                ->post(rtrim($url, '/') . '/v1/patrones', [
+                    'historial' => $historial,
+                    'actual'    => $actual,
+                ]);
+        } catch (Throwable $e) {
+            Log::warning('Patrones: no se pudo contactar el servicio.', ['exception' => get_class($e)]);
+
+            return ['ok' => false, 'code' => 'servicio_no_disponible'];
+        }
+
+        $datos = $respuesta->json();
+
+        if (! $respuesta->successful() || ! is_array($datos) || ($datos['ok'] ?? null) !== true) {
+            Log::warning('Patrones: el servicio no pudo analizar el acceso.', ['status' => $respuesta->status()]);
+
+            return ['ok' => false, 'code' => is_array($datos) ? ($datos['code'] ?? 'error') : 'error'];
+        }
+
+        return [
+            'ok'        => true,
+            'evaluado'  => (bool) ($datos['evaluado'] ?? false),
+            'anomalo'   => (bool) ($datos['anomalo'] ?? false),
+            'confianza' => (float) ($datos['confianza'] ?? 0),
+            'motivos'   => is_array($datos['motivos'] ?? null) ? $datos['motivos'] : [],
+        ];
+    }
+
     private function embeddingValido(?array $datos): bool
     {
         if (! is_array($datos) || ($datos['ok'] ?? null) !== true) {

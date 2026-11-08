@@ -12,6 +12,9 @@ class Organizacion extends Model
         'nombre',
         'tipo',
         'direccion',
+        'colonia',
+        'ciudad',
+        'codigo_postal',
         'telefono',
         'estado',
     ];

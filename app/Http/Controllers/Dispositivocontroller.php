@@ -15,6 +15,7 @@ use App\Models\OrdenDispositivo;
 use App\Models\Rostro;
 use App\Models\Usuario;
 use App\Services\ClienteFacial;
+use App\Services\DetectorPatrones;
 use App\Services\RegistroAnomalias;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -35,6 +36,9 @@ use Illuminate\Support\Facades\DB;
  *   GET  /api/dispositivo/ordenes   Entrega las ordenes pendientes (ABRIR al ESP32 de
  *                                   cerraduras, TOMAR_FOTO a la ESP32-CAM).
  *   POST /api/dispositivo/evidencia (ESP32-CAM) Sube la foto de evidencia de una anomalia (HU7).
+ *
+ * HU7 (Isolation Forest): cada acceso autorizado se revisa DESPUÉS de responder
+ * al dispositivo, para detectar patrones inusuales (ver DetectorPatrones).
  */
 class DispositivoController extends Controller
 {
@@ -175,6 +179,9 @@ class DispositivoController extends Controller
             'dispositivos_id' => $dispositivo->id,
             'codigo_leido'    => $uid,
         ]);
+
+        // HU7: revisar si el acceso es inusual, DESPUÉS de responder al ESP32.
+        $this->revisarPatron($acceso->id);
 
         return response()->json([
             'permitido' => true,
@@ -398,6 +405,9 @@ class DispositivoController extends Controller
 
             return $acceso;
         });
+
+        // HU7: revisar si el acceso es inusual, DESPUÉS de responder a la cámara.
+        $this->revisarPatron($acceso->id);
 
         return response()->json([
             'permitido' => true,
@@ -649,6 +659,19 @@ class DispositivoController extends Controller
         $this->anomalias->intentosFallidos($dispositivo, $fallidos, self::DURACION_BLOQUEO);
 
         return $bloqueo;
+    }
+
+    // ==================================================
+    // HU7: patrones de acceso inusuales (Isolation Forest)
+    // ==================================================
+
+    /**
+     * Manda a revisar el acceso con Isolation Forest DESPUÉS de enviar la
+     * respuesta, para que la apertura del casillero no espere a Python.
+     */
+    private function revisarPatron(int $accesoId): void
+    {
+        dispatch(fn () => app(DetectorPatrones::class)->evaluar($accesoId))->afterResponse();
     }
 
     // ==================================================

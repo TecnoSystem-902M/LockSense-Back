@@ -17,6 +17,9 @@ Contrato (verificado contra LockSense-Back/RostroController.php):
 HU7 — POST /v1/detect: detecta personas y objetos (YOLOv8n en ONNX) en la
 foto de evidencia de una anomalia. Ver app/yolo_detector.py.
 
+HU7 — POST /v1/patrones: detecta si un acceso es inusual para ese usuario
+(Isolation Forest, scikit-learn). Ver app/patrones.py.
+
 Privacidad: no se guardan imágenes ni se registran imágenes o embeddings en
 los logs; no se envía nada a servicios externos.
 """
@@ -32,11 +35,14 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, Header, UploadFile, File
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 try:
     from .yolo_detector import DetectorYolo, confianza_por_defecto, ruta_modelo_por_defecto
+    from .patrones import analizar as analizar_patron
 except ImportError:  # si se ejecuta fuera del paquete app
     from yolo_detector import DetectorYolo, confianza_por_defecto, ruta_modelo_por_defecto
+    from patrones import analizar as analizar_patron
 
 logger = logging.getLogger("face-service")
 
@@ -286,6 +292,57 @@ async def detect(
         **DetectorYolo.resumir(detecciones),
         "detecciones": detecciones,
     }
+
+
+# ==================================================
+# HU7: patrones de acceso inusuales (Isolation Forest)
+# ==================================================
+
+class AccesoPatron(BaseModel):
+    hora: float = Field(ge=0, lt=24)             # 8.5 = 08:30
+    dia_semana: int = Field(ge=0, le=6)          # 0 = domingo ... 6 = sábado
+    accesos_dia: int = Field(ge=1, le=500)       # accesos autorizados ese día, contando este
+    fallidos_previos: int = Field(ge=0, le=500)  # intentos fallidos en los 10 min anteriores
+
+
+class SolicitudPatron(BaseModel):
+    historial: list[AccesoPatron] = Field(max_length=500)
+    actual: AccesoPatron
+
+
+@app.post("/v1/patrones")
+async def patrones(
+    solicitud: SolicitudPatron,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+):
+    """
+    HU7: detecta si un acceso es inusual para ESE usuario (Isolation Forest).
+
+    Respuesta:
+      {"ok": true, "evaluado": false, "motivo": "historial_insuficiente"}
+      {"ok": true, "evaluado": true, "anomalo": true, "puntaje": -0.73, "umbral": -0.56,
+       "confianza": 0.93, "motivos": ["Acceso a las 03:12, fuera de su horario habitual (08:07 a 09:48)."]}
+    """
+    # 1) Autenticación (igual que /v1/embed y /v1/detect).
+    esperada = _api_key_configurada()
+    if esperada is None:
+        logger.error("FACE_SERVICE_API_KEY no está configurada; se rechaza la solicitud.")
+        return _error("unauthorized", "El servicio no está configurado para autenticar.", 503)
+
+    if not x_api_key or not _comparar_claves(x_api_key, esperada):
+        return _error("unauthorized", "Clave de API inválida o ausente.", 401)
+
+    # 2) Análisis (no se guarda nada: el modelo se entrena con el historial recibido).
+    try:
+        resultado = analizar_patron(
+            [a.model_dump() for a in solicitud.historial],
+            solicitud.actual.model_dump(),
+        )
+    except Exception:
+        logger.error("Fallo durante el análisis de patrones.")
+        return _error("unavailable", "No se pudo analizar el patrón de acceso.", 503)
+
+    return {"ok": True, **resultado}
 
 
 def _comparar_claves(entregada: str, esperada: str) -> bool:

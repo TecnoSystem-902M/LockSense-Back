@@ -44,8 +44,8 @@ return [
     'face' => [
         'url' => env('FACE_SERVICE_URL'),
         'key' => env('FACE_SERVICE_API_KEY'),
-        // Tiempo máximo de espera (segundos) al servicio Python.
         'timeout' => (int) env('FACE_SERVICE_TIMEOUT', 15),
+        'timeout_patrones' => env('FACE_SERVICE_TIMEOUT_PATRONES', 5),
         'umbral' => env('FACE_MATCH_THRESHOLD', 0.45),
     ],
 
