@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
 
@@ -39,6 +40,9 @@ class AuthController extends Controller
     // Revisar con: SELECT DISTINCT estado FROM casilleros;
     private const ESTADO_CASILLERO_INICIAL = 'Libre';
 
+    // El superadmin nunca se bloquea por el estado de su organización.
+    private const ROL_SUPERADMIN = 1;
+
     /**
      * Registro de usuario + organización.
      *
@@ -56,7 +60,8 @@ class AuthController extends Controller
             'password'      => 'required|string|min:8|confirmed',
 
             'organizacion_nombre'     => 'required|string|max:150',
-            'organizacion_tipo'       => 'required|string|max:50',
+            // Mismos tipos que el CRUD del superadmin (OrganizacionController::TIPOS)
+            'organizacion_tipo'       => ['required', Rule::in(OrganizacionController::TIPOS)],
             'organizacion_direccion'  => 'nullable|string|max:225',
             'organizacion_colonia'    => 'nullable|string|max:100',
             'organizacion_ciudad'     => 'nullable|string|max:100',
@@ -410,6 +415,18 @@ class AuthController extends Controller
                 'message' => 'Tu cuenta no está verificada. Revisa tu correo.',
                 'code'    => 'NOT_VERIFIED',
                 'email'   => $usuario->email,
+            ], 403);
+        }
+
+        // Organización dada de baja por el superadministrador.
+        $usuario->loadMissing('organizacion');
+
+        if ($usuario->organizacion
+            && $usuario->organizacion->estado !== 'A'
+            && (int) $usuario->roles_id !== self::ROL_SUPERADMIN) {
+            return response()->json([
+                'message' => 'Tu organización está dada de baja. Contacta al administrador de LockSense.',
+                'code'    => 'ORGANIZACION_INACTIVA',
             ], 403);
         }
 

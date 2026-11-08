@@ -7,6 +7,10 @@ use App\Http\Controllers\UsuarioController;
 use App\Http\Controllers\CasilleroController;
 use App\Http\Controllers\DispositivoController;
 use App\Http\Controllers\PanelUsuarioController;
+use App\Http\Controllers\OrganizacionController;
+use App\Http\Controllers\SuperAdminDashboardController;
+use App\Http\Controllers\AdministradorController;
+use App\Http\Controllers\GestionDispositivoController;
 use App\Http\Controllers\RostroController;
 use App\Http\Middleware\AutenticarDispositivo;
 use Illuminate\Support\Facades\Route;
@@ -49,9 +53,28 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/mis-anomalias', [AnomaliaController::class, 'misAnomalias']);
     Route::get('/mis-anomalias/{id}/evidencia', [AnomaliaController::class, 'miEvidencia']);
 
+    Route::get('/superadmin/dashboard', [SuperAdminDashboardController::class, 'resumen']);
+
     Route::get('/usuario/dashboard', [PanelUsuarioController::class, 'resumen']);
     Route::get('/usuario/casillero', [PanelUsuarioController::class, 'casillero']);
     Route::get('/usuario/actividad', [PanelUsuarioController::class, 'actividad']);
+
+    Route::get('/superadmin/organizaciones', [OrganizacionController::class, 'index']);
+    Route::post('/superadmin/organizaciones', [OrganizacionController::class, 'store']);
+    Route::put('/superadmin/organizaciones/{id}', [OrganizacionController::class, 'update']);
+    Route::patch('/superadmin/organizaciones/{id}/estado', [OrganizacionController::class, 'cambiarEstado']);
+
+    Route::get('/superadmin/administradores', [AdministradorController::class, 'index']);
+    Route::post('/superadmin/administradores', [AdministradorController::class, 'store']);
+    Route::put('/superadmin/administradores/{id}', [AdministradorController::class, 'update']);
+    Route::patch('/superadmin/administradores/{id}/estado', [AdministradorController::class, 'cambiarEstado']);
+
+    Route::get('/superadmin/dispositivos', [GestionDispositivoController::class, 'index']);
+Route::get('/superadmin/dispositivos/opciones', [GestionDispositivoController::class, 'opciones']);
+Route::post('/superadmin/dispositivos', [GestionDispositivoController::class, 'store']);
+Route::put('/superadmin/dispositivos/{id}', [GestionDispositivoController::class, 'update']);
+Route::post('/superadmin/dispositivos/{id}/token', [GestionDispositivoController::class, 'regenerarToken']);
+Route::patch('/superadmin/dispositivos/{id}/estado', [GestionDispositivoController::class, 'cambiarEstado']);
 });
 
 Route::prefix('dispositivo')
