@@ -10,6 +10,7 @@ use App\Http\Controllers\PanelUsuarioController;
 use App\Http\Controllers\OrganizacionController;
 use App\Http\Controllers\SuperAdminDashboardController;
 use App\Http\Controllers\AdministradorController;
+use App\Http\Controllers\PushController;
 use App\Http\Controllers\GestionDispositivoController;
 use App\Http\Controllers\RostroController;
 use App\Http\Middleware\AutenticarDispositivo;
@@ -77,6 +78,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/superadmin/dispositivos/{id}', [GestionDispositivoController::class, 'update']);
     Route::post('/superadmin/dispositivos/{id}/token', [GestionDispositivoController::class, 'regenerarToken']);
     Route::patch('/superadmin/dispositivos/{id}/estado', [GestionDispositivoController::class, 'cambiarEstado']);
+
+    Route::get('/push/clave-publica', [PushController::class, 'clavePublica']);
+Route::post('/push/suscripcion', [PushController::class, 'suscribir']);
+Route::delete('/push/suscripcion', [PushController::class, 'cancelar']);
 });
 
 Route::prefix('dispositivo')
