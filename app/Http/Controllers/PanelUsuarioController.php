@@ -21,6 +21,10 @@ use Illuminate\Http\Request;
  *   Estado de la puerta (abierto, cerrado o bloqueado), sus 10 accesos
  *   más recientes y los 10 últimos estados de la puerta.
  *
+ * GET /api/usuario/comportamiento
+ *   Su patrón de uso (el "normal" que aprende Isolation Forest): horario
+ *   habitual, días que más usa, accesos por día y accesos por hora.
+ *
  * GET /api/usuario/actividad
  *   Toda la actividad del usuario: sus accesos (autorizados y fallidos),
  *   los eventos de su casillero y las anomalías detectadas por la IA.
@@ -44,6 +48,13 @@ class PanelUsuarioController extends Controller
     private const DIAS_GRAFICA = 7;
 
     private const DIAS_SEMANA = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+
+    // Mismos valores que DetectorPatrones (Isolation Forest).
+    private const MAX_HISTORIAL_PATRON = 200;
+    private const MINIMO_HISTORIAL_PATRON = 20;
+
+    // Días que cubre la gráfica de accesos por hora.
+    private const DIAS_GRAFICA_HORAS = 30;
 
     // Estado de la puerta (vista Mi casillero).
     private const PUERTA_ABIERTO   = 'ABIERTO';
@@ -331,6 +342,119 @@ class PanelUsuarioController extends Controller
             'total'       => $total,
             'actividades' => $actividades,
         ]);
+    }
+
+    public function comportamiento(Request $request): JsonResponse
+    {
+        $usuario = $request->user();
+
+        abort_unless((int) $usuario->roles_id === self::ROL_USUARIO, 403,
+            'Solo los usuarios pueden ver su comportamiento.');
+
+        // Los mismos accesos con los que aprende Isolation Forest.
+        $accesos = Acceso::query()
+            ->where('usuarios_id', $usuario->id)
+            ->where('resultado', Acceso::AUTORIZADO)
+            ->orderByDesc('fecha_hora')
+            ->limit(self::MAX_HISTORIAL_PATRON)
+            ->get(['id', 'fecha_hora'])
+            ->map(fn (Acceso $a) => Carbon::parse($a->fecha_hora));
+
+        $total = $accesos->count();
+
+        // ---- Estado del análisis ----
+        $analisis = [
+            'activo'  => $total >= self::MINIMO_HISTORIAL_PATRON,
+            'accesos' => $total,
+            'minimo'  => self::MINIMO_HISTORIAL_PATRON,
+            'faltan'  => max(0, self::MINIMO_HISTORIAL_PATRON - $total),
+        ];
+
+        if ($total === 0) {
+            return response()->json([
+                'analisis' => $analisis,
+                'horario'  => null,
+                'dias'     => $this->diasSemana(collect()),
+                'por_dia'  => null,
+                'horas'    => array_fill(0, 24, 0),
+            ]);
+        }
+
+        // ---- Horario habitual: del 10% al 90% de sus horas ----
+        $horas = $accesos->map(fn (Carbon $f) => $f->hour + $f->minute / 60)->sort()->values();
+
+        $horario = [
+            'inicio' => $this->formatoHora($this->percentil($horas, 10)),
+            'fin'    => $this->formatoHora($this->percentil($horas, 90)),
+        ];
+
+        // ---- Accesos por día ----
+        $porFecha = $accesos->countBy(fn (Carbon $f) => $f->format('Y-m-d'))->values()->sort()->values();
+
+        $porDia = [
+            'promedio' => round($porFecha->avg(), 1),
+            'maximo'   => (int) round($this->percentil($porFecha, 90)),
+        ];
+
+        // ---- Accesos por hora (últimos 30 días) ----
+        $desde = now()->startOfDay()->subDays(self::DIAS_GRAFICA_HORAS - 1);
+        $porHora = array_fill(0, 24, 0);
+
+        foreach ($accesos as $fecha) {
+            if ($fecha->greaterThanOrEqualTo($desde)) {
+                $porHora[$fecha->hour]++;
+            }
+        }
+
+        return response()->json([
+            'analisis' => $analisis,
+            'horario'  => $horario,
+            'dias'     => $this->diasSemana($accesos),
+            'por_dia'  => $porDia,
+            'horas'    => $porHora,
+        ]);
+    }
+
+    /**
+     * Los 7 días (de lunes a domingo) con cuántos accesos tiene en cada uno
+     * y una intensidad de 0 a 1 (1 = el día que más lo usa).
+     */
+    private function diasSemana($accesos): array
+    {
+        $conteo = $accesos->countBy(fn (Carbon $f) => $f->dayOfWeek);
+        $maximo = max(1, (int) $conteo->max());
+
+        // Orden de lunes (1) a domingo (0).
+        return collect([1, 2, 3, 4, 5, 6, 0])->map(fn (int $d) => [
+            'dia'        => self::DIAS_SEMANA[$d],
+            'total'      => (int) $conteo->get($d, 0),
+            'intensidad' => round($conteo->get($d, 0) / $maximo, 2),
+        ])->all();
+    }
+
+    /** Percentil de una colección ordenada de números (igual que numpy). */
+    private function percentil($ordenados, float $p): float
+    {
+        $n = $ordenados->count();
+
+        if ($n === 1) {
+            return (float) $ordenados->first();
+        }
+
+        $posicion = ($n - 1) * $p / 100;
+        $abajo    = (int) floor($posicion);
+        $arriba   = (int) ceil($posicion);
+        $peso     = $posicion - $abajo;
+
+        return (float) $ordenados[$abajo] * (1 - $peso) + (float) $ordenados[$arriba] * $peso;
+    }
+
+    private function formatoHora(float $hora): string
+    {
+        $h = (int) floor($hora) % 24;
+        $m = (int) round(($hora - floor($hora)) * 60) % 60;
+
+        return sprintf('%02d:%02d', $h, $m);
     }
 
     private function tipoDeAcceso(Acceso $acceso): string

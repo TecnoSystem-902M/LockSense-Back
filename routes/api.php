@@ -58,6 +58,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/usuario/dashboard', [PanelUsuarioController::class, 'resumen']);
     Route::get('/usuario/casillero', [PanelUsuarioController::class, 'casillero']);
     Route::get('/usuario/actividad', [PanelUsuarioController::class, 'actividad']);
+    Route::get('/usuario/comportamiento', [PanelUsuarioController::class, 'comportamiento']);
 
     Route::get('/superadmin/organizaciones', [OrganizacionController::class, 'index']);
     Route::post('/superadmin/organizaciones', [OrganizacionController::class, 'store']);
@@ -70,11 +71,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/superadmin/administradores/{id}/estado', [AdministradorController::class, 'cambiarEstado']);
 
     Route::get('/superadmin/dispositivos', [GestionDispositivoController::class, 'index']);
-Route::get('/superadmin/dispositivos/opciones', [GestionDispositivoController::class, 'opciones']);
-Route::post('/superadmin/dispositivos', [GestionDispositivoController::class, 'store']);
-Route::put('/superadmin/dispositivos/{id}', [GestionDispositivoController::class, 'update']);
-Route::post('/superadmin/dispositivos/{id}/token', [GestionDispositivoController::class, 'regenerarToken']);
-Route::patch('/superadmin/dispositivos/{id}/estado', [GestionDispositivoController::class, 'cambiarEstado']);
+    Route::get('/superadmin/dispositivos/opciones', [GestionDispositivoController::class, 'opciones']);
+    Route::post('/superadmin/dispositivos', [GestionDispositivoController::class, 'store']);
+    Route::put('/superadmin/dispositivos/{id}', [GestionDispositivoController::class, 'update']);
+    Route::post('/superadmin/dispositivos/{id}/token', [GestionDispositivoController::class, 'regenerarToken']);
+    Route::patch('/superadmin/dispositivos/{id}/estado', [GestionDispositivoController::class, 'cambiarEstado']);
 });
 
 Route::prefix('dispositivo')
