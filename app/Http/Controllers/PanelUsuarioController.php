@@ -14,7 +14,8 @@ use Illuminate\Http\Request;
  * LockSense - Dashboard del usuario (rol USUARIO).
  *
  * GET /api/usuario/dashboard
- *   Nombre, estado de su casillero, accesos del mes y alertas de hoy.
+ *   Nombre, estado de su casillero, accesos del mes, alertas de hoy y
+ *   anomalías por día de los últimos 7 días (gráfica).
  *
  * GET /api/usuario/casillero
  *   Estado de la puerta (abierto, cerrado o bloqueado), sus 10 accesos
@@ -38,6 +39,11 @@ class PanelUsuarioController extends Controller
 
     // Minutos que el panel muestra "En alerta" despues de la ultima alerta.
     private const MINUTOS_EN_ALERTA = 60;
+
+    // Días que muestra la gráfica de anomalías.
+    private const DIAS_GRAFICA = 7;
+
+    private const DIAS_SEMANA = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 
     // Estado de la puerta (vista Mi casillero).
     private const PUERTA_ABIERTO   = 'ABIERTO';
@@ -131,7 +137,37 @@ class PanelUsuarioController extends Controller
             'estado'      => $this->calcularEstado($casillero, $alertaReciente),
             'accesos_mes' => $accesosMes,
             'alertas_hoy' => $alertasHoy,
+            'grafica'     => $this->anomaliasPorDia($usuario->id),
         ]);
+    }
+
+    /**
+     * Anomalías del usuario en cada uno de los últimos 7 días (incluido hoy).
+     * Incluye todas las fuentes: reglas, YOLO y (después) Isolation Forest.
+     */
+    private function anomaliasPorDia(int $usuarioId): array
+    {
+        $inicio = now()->startOfDay()->subDays(self::DIAS_GRAFICA - 1);
+
+        $conteo = Anomalia::query()
+            ->where('usuarios_id', $usuarioId)
+            ->where('fecha_hora', '>=', $inicio)
+            ->get(['id', 'fecha_hora'])
+            ->countBy(fn (Anomalia $a) => Carbon::parse($a->fecha_hora)->format('Y-m-d'));
+
+        $dias = [];
+
+        for ($i = 0; $i < self::DIAS_GRAFICA; $i++) {
+            $fecha = $inicio->copy()->addDays($i);
+
+            $dias[] = [
+                'fecha' => $fecha->format('d/m/Y'),
+                'dia'   => self::DIAS_SEMANA[$fecha->dayOfWeek],
+                'total' => $conteo->get($fecha->format('Y-m-d'), 0),
+            ];
+        }
+
+        return $dias;
     }
 
     public function casillero(Request $request): JsonResponse
