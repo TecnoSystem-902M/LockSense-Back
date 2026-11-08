@@ -150,9 +150,9 @@ class OrganizacionController extends Controller
             'nombre'        => trim((string) $request->input('nombre')),
             'telefono'      => preg_replace('/\D/', '', (string) $request->input('telefono')),
             'direccion'     => trim((string) $request->input('direccion')),
-            'colonia'       => trim((string) $request->input('colonia')) ?: null,
+            'colonia'       => trim((string) $request->input('colonia')),
             'ciudad'        => trim((string) $request->input('ciudad')),
-            'codigo_postal' => trim((string) $request->input('codigo_postal')) ?: null,
+            'codigo_postal' => trim((string) $request->input('codigo_postal')),
         ]);
 
         $validator = Validator::make($request->all(), [
@@ -160,9 +160,9 @@ class OrganizacionController extends Controller
             'tipo'          => ['required', Rule::in(self::TIPOS)],
             'telefono'      => ['required', 'digits:10'],
             'direccion'     => ['required', 'string', 'max:225'],
-            'colonia'       => ['nullable', 'string', 'max:100'],
+            'colonia'       => ['required', 'string', 'max:100'],
             'ciudad'        => ['required', 'string', 'max:100'],
-            'codigo_postal' => ['nullable', 'digits:5'],
+            'codigo_postal' => ['required', 'digits:5'],
         ], [
             'nombre.required'      => 'El nombre es obligatorio.',
             'nombre.min'           => 'El nombre debe tener al menos 3 caracteres.',
@@ -170,13 +170,15 @@ class OrganizacionController extends Controller
             'tipo.required'        => 'Selecciona el tipo de organización.',
             'tipo.in'              => 'El tipo seleccionado no es válido.',
             'telefono.required'    => 'El teléfono es obligatorio.',
-            'telefono.digits'      => 'El teléfono debe tener 10 dígitos.',
+            'telefono.digits'      => 'El teléfono debe tener 10 dígitos (lada + número).',
             'direccion.required'   => 'La dirección es obligatoria.',
             'direccion.max'        => 'La dirección no puede pasar de 225 caracteres.',
+            'colonia.required'     => 'La colonia es obligatoria.',
             'colonia.max'          => 'La colonia no puede pasar de 100 caracteres.',
             'ciudad.required'      => 'La ciudad es obligatoria.',
             'ciudad.max'           => 'La ciudad no puede pasar de 100 caracteres.',
-            'codigo_postal.digits' => 'El código postal debe tener 5 dígitos.',
+            'codigo_postal.required' => 'El código postal es obligatorio.',
+            'codigo_postal.digits'   => 'El código postal debe tener 5 dígitos.',
         ]);
 
         // Nombre único sin importar mayúsculas/minúsculas.

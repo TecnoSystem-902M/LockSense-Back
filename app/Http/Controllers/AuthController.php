@@ -52,22 +52,88 @@ class AuthController extends Controller
      */
     public function register(Request $request)
     {
-        $validator = Validator::make($request->all(), [
-            'nombre'        => 'required|string|max:100',
-            'apellido_pa'   => 'required|string|max:100',
-            'apellido_ma'   => 'nullable|string|max:100',
-            'email'         => 'required|string|email|max:150|unique:usuarios,email',
-            'password'      => 'required|string|min:8|confirmed',
-
-            'organizacion_nombre'     => 'required|string|max:150',
-            // Mismos tipos que el CRUD del superadmin (OrganizacionController::TIPOS)
-            'organizacion_tipo'       => ['required', Rule::in(OrganizacionController::TIPOS)],
-            'organizacion_direccion'  => 'nullable|string|max:225',
-            'organizacion_colonia'    => 'nullable|string|max:100',
-            'organizacion_ciudad'     => 'nullable|string|max:100',
-            'organizacion_codigo_postal' => 'nullable|string|max:10',
-            'organizacion_telefono'   => 'nullable|string|max:20',
+        // Limpieza antes de validar (igual que en los CRUD del superadmin).
+        $request->merge([
+            'nombre'                     => trim((string) $request->input('nombre')),
+            'apellido_pa'                => trim((string) $request->input('apellido_pa')),
+            'apellido_ma'                => trim((string) $request->input('apellido_ma')) ?: null,
+            'email'                      => strtolower(trim((string) $request->input('email'))),
+            'organizacion_nombre'        => trim((string) $request->input('organizacion_nombre')),
+            'organizacion_telefono'      => preg_replace('/\D/', '', (string) $request->input('organizacion_telefono')),
+            'organizacion_direccion'     => trim((string) $request->input('organizacion_direccion')),
+            'organizacion_colonia'       => trim((string) $request->input('organizacion_colonia')),
+            'organizacion_ciudad'        => trim((string) $request->input('organizacion_ciudad')),
+            'organizacion_codigo_postal' => trim((string) $request->input('organizacion_codigo_postal')),
         ]);
+
+        $soloLetras = 'regex:/^[\pL\s\'.-]+$/u';   // letras (con acentos), espacios, ' . -
+
+        $validator = Validator::make($request->all(), [
+            // Administrador (mismas reglas que AdministradorController)
+            'nombre'        => ['required', 'string', 'min:2', 'max:100', $soloLetras],
+            'apellido_pa'   => ['required', 'string', 'min:2', 'max:100', $soloLetras],
+            'apellido_ma'   => ['nullable', 'string', 'max:100', $soloLetras],
+            'email'         => ['required', 'email', 'max:150', 'unique:usuarios,email'],
+            'password'      => ['required', 'string', 'min:8', 'max:72', 'regex:/[A-Za-z]/', 'regex:/\d/', 'confirmed'],
+
+            // Organización (mismas reglas que OrganizacionController)
+            'organizacion_nombre'        => ['required', 'string', 'min:3', 'max:150'],
+            'organizacion_tipo'          => ['required', Rule::in(OrganizacionController::TIPOS)],
+            'organizacion_telefono'      => ['required', 'digits:10'],
+            'organizacion_direccion'     => ['required', 'string', 'max:225'],
+            'organizacion_colonia'       => ['required', 'string', 'max:100'],
+            'organizacion_ciudad'        => ['required', 'string', 'max:100'],
+            'organizacion_codigo_postal' => ['required', 'digits:5'],
+        ], [
+            'nombre.required'      => 'El nombre es obligatorio.',
+            'nombre.min'           => 'El nombre debe tener al menos 2 letras.',
+            'nombre.max'           => 'El nombre no puede pasar de 100 caracteres.',
+            'nombre.regex'         => 'El nombre solo puede tener letras.',
+            'apellido_pa.required' => 'El apellido paterno es obligatorio.',
+            'apellido_pa.min'      => 'El apellido paterno debe tener al menos 2 letras.',
+            'apellido_pa.max'      => 'El apellido paterno no puede pasar de 100 caracteres.',
+            'apellido_pa.regex'    => 'El apellido paterno solo puede tener letras.',
+            'apellido_ma.max'      => 'El apellido materno no puede pasar de 100 caracteres.',
+            'apellido_ma.regex'    => 'El apellido materno solo puede tener letras.',
+            'email.required'       => 'El correo es obligatorio.',
+            'email.email'          => 'Escribe un correo válido.',
+            'email.max'            => 'El correo no puede pasar de 150 caracteres.',
+            'email.unique'         => 'Ese correo ya está registrado.',
+            'password.required'    => 'La contraseña es obligatoria.',
+            'password.min'         => 'La contraseña debe tener al menos 8 caracteres.',
+            'password.max'         => 'La contraseña no puede pasar de 72 caracteres.',
+            'password.regex'       => 'La contraseña debe tener al menos una letra y un número.',
+            'password.confirmed'   => 'Las contraseñas no coinciden.',
+
+            'organizacion_nombre.required'      => 'El nombre de la organización es obligatorio.',
+            'organizacion_nombre.min'           => 'El nombre debe tener al menos 3 caracteres.',
+            'organizacion_nombre.max'           => 'El nombre no puede pasar de 150 caracteres.',
+            'organizacion_tipo.required'        => 'Selecciona el tipo de organización.',
+            'organizacion_tipo.in'              => 'El tipo seleccionado no es válido.',
+            'organizacion_telefono.required'    => 'El teléfono es obligatorio.',
+            'organizacion_telefono.digits'      => 'El teléfono debe tener 10 dígitos (lada + número).',
+            'organizacion_direccion.required'   => 'La dirección es obligatoria.',
+            'organizacion_direccion.max'        => 'La dirección no puede pasar de 225 caracteres.',
+            'organizacion_colonia.required'     => 'La colonia es obligatoria.',
+            'organizacion_colonia.max'          => 'La colonia no puede pasar de 100 caracteres.',
+            'organizacion_ciudad.required'      => 'La ciudad es obligatoria.',
+            'organizacion_ciudad.max'           => 'La ciudad no puede pasar de 100 caracteres.',
+            'organizacion_codigo_postal.required' => 'El código postal es obligatorio.',
+            'organizacion_codigo_postal.digits'   => 'El código postal debe tener 5 dígitos.',
+        ]);
+
+        // Nombre de organización único, sin importar mayúsculas/minúsculas.
+        $validator->after(function ($validator) use ($request) {
+            if ($validator->errors()->has('organizacion_nombre')) {
+                return;
+            }
+
+            $nombre = addcslashes($request->input('organizacion_nombre'), '%_\\');
+
+            if (Organizacion::where('nombre', 'ilike', $nombre)->exists()) {
+                $validator->errors()->add('organizacion_nombre', 'Ya existe una organización con ese nombre.');
+            }
+        });
 
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
