@@ -6,6 +6,7 @@ use App\Models\Acceso;
 use App\Models\Anomalia;
 use App\Models\Casillero;
 use App\Models\EventoCasillero;
+use App\Models\Organizacion;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -24,6 +25,10 @@ use Illuminate\Http\Request;
  * GET /api/usuario/comportamiento
  *   Su patrón de uso (el "normal" que aprende Isolation Forest): horario
  *   habitual, días que más usa, accesos por día y accesos por hora.
+ *
+ * GET /api/usuario/reporte
+ *   Datos extra para el PDF "Descargar reporte": organización, periodo y
+ *   el detalle de las anomalías de los últimos 7 días (con su motivo).
  *
  * GET /api/usuario/actividad
  *   Toda la actividad del usuario: sus accesos (autorizados y fallidos),
@@ -105,6 +110,24 @@ class PanelUsuarioController extends Controller
         'PERSONAS_MULTIPLES' => 'Varias personas frente al casillero',
         'OBJETO_SOSPECHOSO'  => 'Objeto sospechoso detectado',
         'PATRON_INUSUAL'     => 'Patrón de acceso inusual',
+    ];
+
+    // Textos para el reporte PDF.
+    private const TIPOS_ANOMALIA = [
+        'APERTURA_NO_AUTORIZADA'    => 'Apertura no autorizada',
+        'INTENTOS_FALLIDOS'         => 'Intentos fallidos',
+        'VIBRACION'                 => 'Golpe o vibración',
+        'PUERTA_ABIERTA_PROLONGADA' => 'Puerta abierta mucho tiempo',
+        'PERSONAS_MULTIPLES'        => 'Varias personas',
+        'OBJETO_SOSPECHOSO'         => 'Objeto sospechoso',
+        'PATRON_INUSUAL'            => 'Acceso inusual',
+    ];
+
+    private const RIESGOS = [
+        'BAJO'    => 'Bajo',
+        'MEDIO'   => 'Medio',
+        'ALTO'    => 'Alto',
+        'CRITICO' => 'Crítico',
     ];
 
     private const MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun',
@@ -341,6 +364,49 @@ class PanelUsuarioController extends Controller
         return response()->json([
             'total'       => $total,
             'actividades' => $actividades,
+        ]);
+    }
+
+    public function reporte(Request $request): JsonResponse
+    {
+        $usuario = $request->user();
+
+        abort_unless((int) $usuario->roles_id === self::ROL_USUARIO, 403,
+            'Solo los usuarios pueden descargar su reporte.');
+
+        $organizacion = Organizacion::find($usuario->organizaciones_id);
+
+        $casillero = Casillero::query()
+            ->whereHas('asignacionActiva', fn ($q) => $q->where('usuarios_id', $usuario->id))
+            ->first();
+
+        // Mismo periodo que la gráfica de anomalías (últimos 7 días, incluido hoy).
+        $inicio = now()->startOfDay()->subDays(self::DIAS_GRAFICA - 1);
+
+        $anomalias = Anomalia::query()
+            ->where('usuarios_id', $usuario->id)
+            ->where('fecha_hora', '>=', $inicio)
+            ->orderByDesc('fecha_hora')
+            ->get()
+            ->map(fn (Anomalia $anomalia) => [
+                'fecha'  => $anomalia->fecha_hora?->format('d/m/Y'),
+                'hora'   => $anomalia->fecha_hora?->format('H:i'),
+                'tipo'   => self::TIPOS_ANOMALIA[$anomalia->tipo]
+                    ?? ucfirst(strtolower(str_replace('_', ' ', $anomalia->tipo))),
+                'riesgo' => self::RIESGOS[$anomalia->nivel_riesgo] ?? $anomalia->nivel_riesgo,
+                'motivo' => $anomalia->descripcion ?: 'Sin descripción',
+            ]);
+
+        return response()->json([
+            'usuario'      => trim($usuario->nombre . ' ' . $usuario->apellido_pa),
+            'organizacion' => $organizacion?->nombre,
+            'casillero'    => $casillero?->numero,
+            'periodo'      => [
+                'desde' => $inicio->format('d/m/Y'),
+                'hasta' => now()->format('d/m/Y'),
+            ],
+            'generado'     => now()->format('d/m/Y H:i'),
+            'anomalias'    => $anomalias,
         ]);
     }
 
