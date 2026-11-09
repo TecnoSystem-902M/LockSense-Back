@@ -179,11 +179,11 @@ class UsuarioController extends Controller
         $reglas = [
             'nombre'      => 'required|string|max:100',
             'apellido_pa' => 'required|string|max:100',
-            'apellido_ma' => 'nullable|string|max:100',
+            'apellido_ma' => 'required|string|max:100',
             'identificador' => 'required|string|max:90',
             'email'    => 'nullable|email|max:150|unique:usuarios,email',
             'password' => 'required|string|min:8',
-            'telefono' => 'nullable|string|max:20',
+            'telefono' => 'required|string|max:20',
             'estado'   => 'nullable|in:A,P',
         ];
 
