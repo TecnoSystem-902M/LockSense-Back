@@ -279,11 +279,21 @@ class CasilleroController extends Controller
             return $deny;
         }
 
+        // El UID se limpia antes de validar: "D9 94 15 E6" -> "D99415E6"
+        $request->merge([
+            'uid_rfid' => strtoupper(str_replace([':', ' ', '-'], '', (string) $request->input('uid_rfid'))),
+        ]);
+
         $validator = Validator::make($request->all(), [
             'usuarios_id' => ['required', 'integer'],
-            'uid_rfid'    => ['nullable', 'string', 'max:50'],
+            // Tarjetas MIFARE: UID de 4, 7 o 10 bytes = 8, 14 o 20 caracteres hexadecimales
+            'uid_rfid'    => ['required', 'string', 'regex:/^([0-9A-F]{8}|[0-9A-F]{14}|[0-9A-F]{20})$/'],
+        ], [
+            'usuarios_id.required' => 'Selecciona un usuario para asignar el casillero.',
+            'usuarios_id.integer'  => 'El usuario seleccionado no es válido.',
+            'uid_rfid.required'    => 'Ingresa el UID de la tarjeta RFID.',
+            'uid_rfid.regex'       => 'El UID debe tener 8, 14 o 20 caracteres hexadecimales (0-9 y A-F).',
         ]);
-        
 
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
@@ -332,19 +342,16 @@ class CasilleroController extends Controller
             ], 409);
         }
 
-        $uid = null;
-        if ($request->filled('uid_rfid')) {
-            $uid = strtoupper(str_replace([':', ' ', '-'], '', $request->uid_rfid));
+        $uid = $request->input('uid_rfid');   // ya viene limpio y validado
 
-            $existente = CredencialRfid::where('codigo', $uid)
-                ->where('usuarios_id', '!=', $objetivo->id)
-                ->first();
+        $existente = CredencialRfid::where('codigo', $uid)
+            ->where('usuarios_id', '!=', $objetivo->id)
+            ->first();
 
-            if ($existente) {
-                return response()->json([
-                    'message' => 'Esa tarjeta RFID ya está registrada en otro usuario.',
-                ], 409);
-            }
+        if ($existente) {
+            return response()->json([
+                'message' => 'Esa tarjeta RFID ya está registrada en otro usuario.',
+            ], 409);
         }
 
         try {
@@ -382,17 +389,15 @@ class CasilleroController extends Controller
                     'estado'           => 'A',
                 ]);
 
-                if ($uid) {
-                    CredencialRfid::updateOrCreate(
-                        ['usuarios_id' => $objetivo->id],
-                        [
-                            'codigo'         => $uid,
-                            'tipo'           => 'MIFARE',
-                            'estado'         => 'A',
-                            'fecha_registro' => now(),
-                        ]
-                    );
-                }
+                CredencialRfid::updateOrCreate(
+                    ['usuarios_id' => $objetivo->id],
+                    [
+                        'codigo'         => $uid,
+                        'tipo'           => 'MIFARE',
+                        'estado'         => 'A',
+                        'fecha_registro' => now(),
+                    ]
+                );
 
                 EventoCasillero::query()->create([
                     'casilleros_id' => $casilleroBloqueado->id,

@@ -70,6 +70,79 @@ class UsuarioController extends Controller
     }
 
     // ----------------------------------------------------------------
+    // Validación (mismas reglas que el registro público)
+    // ----------------------------------------------------------------
+
+    // Solo letras (con acentos y ñ) y espacios.
+    private const REGEX_NOMBRE = '/^[\pL\s]+$/u';
+
+    // Al menos una letra y un número.
+    private const REGEX_PASSWORD = '/^(?=.*\pL)(?=.*\d).+$/u';
+
+    private function mensajesValidacion(): array
+    {
+        return [
+            'nombre.required'      => 'El nombre es obligatorio.',
+            'nombre.regex'         => 'El nombre solo puede tener letras y espacios.',
+            'nombre.min'           => 'El nombre debe tener al menos 2 caracteres.',
+            'nombre.max'           => 'El nombre admite máximo 100 caracteres.',
+            'apellido_pa.required' => 'El apellido paterno es obligatorio.',
+            'apellido_pa.regex'    => 'El apellido paterno solo puede tener letras y espacios.',
+            'apellido_pa.min'      => 'El apellido paterno debe tener al menos 2 caracteres.',
+            'apellido_pa.max'      => 'El apellido paterno admite máximo 100 caracteres.',
+            'apellido_ma.required' => 'El apellido materno es obligatorio.',
+            'apellido_ma.regex'    => 'El apellido materno solo puede tener letras y espacios.',
+            'apellido_ma.min'      => 'El apellido materno debe tener al menos 2 caracteres.',
+            'apellido_ma.max'      => 'El apellido materno admite máximo 100 caracteres.',
+            'identificador.required' => 'La matrícula es obligatoria.',
+            'identificador.min'    => 'La matrícula debe tener al menos 3 caracteres.',
+            'identificador.max'    => 'La matrícula admite máximo 90 caracteres.',
+            'email.email'          => 'El correo no es válido.',
+            'email.unique'         => 'Ese correo ya está registrado.',
+            'password.required'    => 'La contraseña es obligatoria.',
+            'password.min'         => 'La contraseña debe tener al menos 8 caracteres.',
+            'password.max'         => 'La contraseña admite máximo 72 caracteres.',
+            'password.regex'       => 'La contraseña debe tener al menos una letra y un número.',
+            'telefono.required'    => 'El teléfono es obligatorio.',
+            'telefono.digits'      => 'El teléfono debe tener 10 dígitos.',
+        ];
+    }
+
+    /**
+     * Limpia los datos antes de validar:
+     * - quita espacios al inicio y final de los textos
+     * - teléfono: solo dígitos; si viene con 52 adelante (12 dígitos) se quita
+     */
+    private function limpiarEntrada(Request $request): void
+    {
+        $limpio = [];
+
+        foreach (['nombre', 'apellido_pa', 'apellido_ma', 'identificador', 'email'] as $campo) {
+            if ($request->has($campo) && is_string($request->input($campo))) {
+                $limpio[$campo] = trim($request->input($campo));
+            }
+        }
+
+        if ($request->has('telefono')) {
+            $limpio['telefono'] = $this->telefonoNacional((string) $request->input('telefono'));
+        }
+
+        $request->merge($limpio);
+    }
+
+    /** "+52 55 1234 5678" -> "5512345678" */
+    private function telefonoNacional(string $telefono): string
+    {
+        $digitos = preg_replace('/\D/', '', $telefono);
+
+        if (strlen($digitos) === 12 && str_starts_with($digitos, '52')) {
+            $digitos = substr($digitos, 2);
+        }
+
+        return $digitos;
+    }
+
+    // ----------------------------------------------------------------
     // Helpers de matrícula / identificador de acceso
     // ----------------------------------------------------------------
 
@@ -176,15 +249,17 @@ class UsuarioController extends Controller
         }
 
         // 2. Reglas de validación
+        $this->limpiarEntrada($request);
+
         $reglas = [
-            'nombre'      => 'required|string|max:100',
-            'apellido_pa' => 'required|string|max:100',
-            'apellido_ma' => 'required|string|max:100',
-            'identificador' => 'required|string|max:90',
-            'email'    => 'nullable|email|max:150|unique:usuarios,email',
-            'password' => 'required|string|min:8',
-            'telefono' => 'required|string|max:20',
-            'estado'   => 'nullable|in:A,P',
+            'nombre'        => ['required', 'string', 'min:2', 'max:100', 'regex:' . self::REGEX_NOMBRE],
+            'apellido_pa'   => ['required', 'string', 'min:2', 'max:100', 'regex:' . self::REGEX_NOMBRE],
+            'apellido_ma'   => ['required', 'string', 'min:2', 'max:100', 'regex:' . self::REGEX_NOMBRE],
+            'identificador' => ['required', 'string', 'min:3', 'max:90'],
+            'email'         => ['nullable', 'email', 'max:150', 'unique:usuarios,email'],
+            'password'      => ['required', 'string', 'min:8', 'max:72', 'regex:' . self::REGEX_PASSWORD],
+            'telefono'      => ['required', 'digits:10'],
+            'estado'        => ['nullable', 'in:A,P'],
         ];
 
         if ($this->esSuperadmin($user)) {
@@ -192,7 +267,7 @@ class UsuarioController extends Controller
             $reglas['roles_id']          = 'nullable|integer|exists:roles,id';
         }
 
-        $validator = Validator::make($request->all(), $reglas);
+        $validator = Validator::make($request->all(), $reglas, $this->mensajesValidacion());
 
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
@@ -212,7 +287,7 @@ class UsuarioController extends Controller
         $usuario->identificador     = $identificador;
         $usuario->email             = $request->filled('email') ? $request->email : null;
         $usuario->password          = Hash::make($request->password);
-        $usuario->telefono          = $request->filled('telefono') ? $request->telefono : null;
+        $usuario->telefono          = '+52' . $request->telefono;
         $usuario->organizaciones_id = $organizacionId;
         $usuario->roles_id          = $rolId;
         $usuario->estado            = $request->filled('estado') ? $request->estado : 'A';
@@ -242,18 +317,21 @@ class UsuarioController extends Controller
             return $deny;
         }
 
+        $this->limpiarEntrada($request);
+
         $reglas = [
-            'nombre'      => 'required|string|max:100',
-            'apellido_pa' => 'required|string|max:100',
-            'apellido_ma' => 'nullable|string|max:100',
-            'identificador' => 'required|string|max:90',
+            'nombre'        => ['required', 'string', 'min:2', 'max:100', 'regex:' . self::REGEX_NOMBRE],
+            'apellido_pa'   => ['required', 'string', 'min:2', 'max:100', 'regex:' . self::REGEX_NOMBRE],
+            'apellido_ma'   => ['required', 'string', 'min:2', 'max:100', 'regex:' . self::REGEX_NOMBRE],
+            'identificador' => ['required', 'string', 'min:3', 'max:90'],
             'email' => [
                 'nullable', 'email', 'max:150',
                 Rule::unique('usuarios', 'email')->ignore($usuario->id),
             ],
-            'password' => 'nullable|string|min:8',
-            'telefono' => 'nullable|string|max:20',
-            'estado'   => 'nullable|in:A,P',
+            // Al editar, la contraseña es opcional (vacía = se conserva)
+            'password'      => ['nullable', 'string', 'min:8', 'max:72', 'regex:' . self::REGEX_PASSWORD],
+            'telefono'      => ['required', 'digits:10'],
+            'estado'        => ['nullable', 'in:A,P'],
         ];
 
         if ($this->esSuperadmin($user)) {
@@ -261,7 +339,7 @@ class UsuarioController extends Controller
             $reglas['roles_id']          = 'nullable|integer|exists:roles,id';
         }
 
-        $validator = Validator::make($request->all(), $reglas);
+        $validator = Validator::make($request->all(), $reglas, $this->mensajesValidacion());
 
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
@@ -290,9 +368,7 @@ class UsuarioController extends Controller
             $usuario->email = $request->filled('email') ? $request->email : null;
         }
 
-        if ($request->has('telefono')) {
-            $usuario->telefono = $request->filled('telefono') ? $request->telefono : null;
-        }
+        $usuario->telefono = '+52' . $request->telefono;
 
         if ($this->esSuperadmin($user)) {
             if ($request->filled('organizaciones_id')) {
