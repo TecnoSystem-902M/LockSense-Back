@@ -24,22 +24,28 @@ class EnviadorPush
 
     /**
      * @param array $mensaje ['titulo' => ..., 'cuerpo' => ..., 'url' => ..., 'etiqueta' => ...]
+     * @return array ['dispositivos' => n, 'enviadas' => n, 'errores' => [...]]
      */
-    public function enviarAUsuario(int $usuarioId, array $mensaje): void
+    public function enviarAUsuario(int $usuarioId, array $mensaje): array
     {
+        $resultado = ['dispositivos' => 0, 'enviadas' => 0, 'errores' => []];
+
         $suscripciones = PushSuscripcion::query()
             ->where('usuarios_id', $usuarioId)
             ->get();
 
+        $resultado['dispositivos'] = $suscripciones->count();
+
         if ($suscripciones->isEmpty()) {
-            return;
+            return $resultado;
         }
 
         $config = config('services.webpush');
 
         if (empty($config['public_key']) || empty($config['private_key'])) {
             Log::warning('Push: faltan VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY en el .env.');
-            return;
+            $resultado['errores'][] = 'Faltan VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY.';
+            return $resultado;
         }
 
         try {
@@ -51,8 +57,9 @@ class EnviadorPush
                         'privateKey' => $config['private_key'],
                     ],
                 ],
-                ['TTL' => self::TTL, 'urgency' => 'high'],
-                15   // timeout en segundos
+                ['TTL' => self::TTL, 'urgency' => 'high']
+                // (en la versión 10 de la librería el 3er parámetro ya no es el
+                //  timeout, sino un cliente HTTP; se deja el de por defecto)
             );
 
             $contenido = json_encode($mensaje, JSON_UNESCAPED_UNICODE);
@@ -71,17 +78,25 @@ class EnviadorPush
 
             foreach ($webPush->flush() as $reporte) {
                 // El usuario desinstaló la app o quitó el permiso: se borra.
-                if ($reporte->isSubscriptionExpired()) {
-                    PushSuscripcion::where('endpoint', $reporte->getEndpoint())->delete();
+                if ($reporte->isSuccess()) {
+                    $resultado['enviadas']++;
                     continue;
                 }
 
-                if (! $reporte->isSuccess()) {
-                    Log::warning('Push: no se pudo enviar. ' . $reporte->getReason());
+                if ($reporte->isSubscriptionExpired()) {
+                    PushSuscripcion::where('endpoint', $reporte->getEndpoint())->delete();
+                    $resultado['errores'][] = 'Suscripción vencida (se borró).';
+                    continue;
                 }
+
+                Log::warning('Push: no se pudo enviar. ' . $reporte->getReason());
+                $resultado['errores'][] = $reporte->getReason();
             }
         } catch (\Throwable $e) {
             Log::warning('Push: error al enviar. ' . $e->getMessage());
+            $resultado['errores'][] = $e->getMessage();
         }
+
+        return $resultado;
     }
 }
