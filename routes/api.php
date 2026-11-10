@@ -14,6 +14,7 @@ use App\Http\Controllers\PushController;
 use App\Http\Controllers\GestionDispositivoController;
 use App\Http\Controllers\RostroController;
 use App\Http\Middleware\AutenticarDispositivo;
+use App\Http\Controllers\PruebasController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/register', [AuthController::class, 'register']);
@@ -80,9 +81,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/superadmin/dispositivos/{id}/estado', [GestionDispositivoController::class, 'cambiarEstado']);
 
     Route::get('/push/clave-publica', [PushController::class, 'clavePublica']);
-Route::post('/push/suscripcion', [PushController::class, 'suscribir']);
-Route::delete('/push/suscripcion', [PushController::class, 'cancelar']);
+    Route::post('/push/suscripcion', [PushController::class, 'suscribir']);
+    Route::delete('/push/suscripcion', [PushController::class, 'cancelar']);
 });
+
+Route::post('/pruebas/simular-vibracion', [PruebasController::class, 'simularVibracion'])
+    ->middleware('throttle:10,1');
 
 Route::prefix('dispositivo')
     ->middleware(AutenticarDispositivo::class)

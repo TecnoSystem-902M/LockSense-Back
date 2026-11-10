@@ -55,4 +55,10 @@ return [
         'subject'     => env('VAPID_SUBJECT', 'superadmin.locksense@gmail.com'),
     ],
 
+        'pruebas' => [
+        'habilitadas'  => env('PRUEBAS_HABILITADAS', false),
+        'clave'        => env('PRUEBAS_CLAVE'),
+        'casillero_id' => env('PRUEBAS_CASILLERO_ID'),
+    ],
+
 ];
