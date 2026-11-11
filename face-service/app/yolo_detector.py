@@ -1,8 +1,17 @@
 """
 LockSense — Detector de objetos YOLO (HU7: deteccion de anomalias).
 
-Usa un modelo YOLOv8n exportado a ONNX y lo ejecuta con onnxruntime
-(la misma libreria que ya usa InsightFace), sin instalar PyTorch.
+Usa un modelo YOLOv8 exportado a ONNX (yolov8m, yolov8s o yolov8n, el que exista) y
+lo ejecuta con onnxruntime (la misma libreria que ya usa InsightFace), sin
+instalar PyTorch.
+
+Umbrales de confianza separados:
+  - Personas:             YOLO_CONFIANZA_PERSONAS    (por defecto 0.40)
+  - Objetos sospechosos:  YOLO_CONFIANZA_SOSPECHOSOS (por defecto 0.25)
+  - Demas objetos:        YOLO_CONFIANZA_MINIMA      (por defecto 0.40)
+Un cuchillo es delgado y metalico: el modelo casi nunca lo ve con mucha
+seguridad, por eso su umbral es mas bajo. Las personas se dejan en 0.40 para
+no inventar personas que no estan.
 
 Detecta los 80 objetos del dataset COCO (persona, mochila, celular,
 cuchillo, tijeras, etc.). Para LockSense interesa:
@@ -63,14 +72,36 @@ class DetectorYolo:
         import onnxruntime as ort
 
         self.ruta_modelo = ruta_modelo
-        self.confianza_minima = confianza_minima
         self.iou_nms = iou_nms
+
+        # Umbral por tipo de objeto.
+        self.confianza_general = confianza_minima
+        self.confianza_personas = _leer_confianza("YOLO_CONFIANZA_PERSONAS", 0.40)
+        self.confianza_sospechosos = _leer_confianza("YOLO_CONFIANZA_SOSPECHOSOS", 0.25)
+
+        # Primer filtro: el umbral mas bajo de todos (el de cada clase se
+        # aplica despues, en _umbral_de).
+        self.confianza_minima = min(
+            self.confianza_general, self.confianza_personas, self.confianza_sospechosos
+        )
 
         self.sesion = ort.InferenceSession(ruta_modelo, providers=["CPUExecutionProvider"])
         self.nombre_entrada = self.sesion.get_inputs()[0].name
         self.nombre_modelo = Path(ruta_modelo).stem  # ej. "yolov8n"
 
-        logger.info("Modelo YOLO cargado (CPU).")
+        logger.info(
+            "Modelo YOLO cargado (CPU): %s | umbrales personas=%.2f sospechosos=%.2f otros=%.2f",
+            self.nombre_modelo, self.confianza_personas,
+            self.confianza_sospechosos, self.confianza_general,
+        )
+
+    def _umbral_de(self, clase: str) -> float:
+        """Umbral de confianza que debe pasar cada tipo de objeto."""
+        if clase == "person":
+            return self.confianza_personas
+        if clase in OBJETOS_SOSPECHOSOS:
+            return self.confianza_sospechosos
+        return self.confianza_general
 
     # --------------------------------------------------
 
@@ -135,11 +166,19 @@ class DetectorYolo:
                 self.confianza_minima,
                 self.iou_nms,
             )
+            clase = CLASES_COCO[int(id_clase)] if int(id_clase) < len(CLASES_COCO) else str(int(id_clase))
+            umbral = self._umbral_de(clase)
+
             for k in np.array(seleccion).flatten():
                 i = indices[int(k)]
+
+                # Umbral propio de la clase (ej. persona 0.40, cuchillo 0.25)
+                if float(confianzas[i]) < umbral:
+                    continue
+
                 x, y, cw, ch = cajas_xywh[i]
                 resultado.append({
-                    "clase": CLASES_COCO[int(id_clase)] if int(id_clase) < len(CLASES_COCO) else str(int(id_clase)),
+                    "clase": clase,
                     "confianza": round(float(confianzas[i]), 4),
                     "caja": [
                         int(max(0, x)), int(max(0, y)),
@@ -171,16 +210,33 @@ class DetectorYolo:
 
 
 def ruta_modelo_por_defecto() -> str:
-    """face-service/models/yolov8n.onnx (o lo que diga YOLO_MODEL_PATH)."""
+    """
+    Modelo a usar (el primero que exista, en este orden):
+      1. Lo que diga YOLO_MODEL_PATH.
+      2. face-service/models/yolov8m.onnx  (mediano: el que si reconoce cuchillos)
+      3. face-service/models/yolov8s.onnx
+      4. face-service/models/yolov8n.onnx
+    """
     ruta = os.getenv("YOLO_MODEL_PATH")
     if ruta:
         return ruta
-    return str(Path(__file__).resolve().parent.parent / "models" / "yolov8n.onnx")
+
+    carpeta = Path(__file__).resolve().parent.parent / "models"
+    for nombre in ("yolov8m.onnx", "yolov8s.onnx"):
+        candidato = carpeta / nombre
+        if candidato.exists():
+            return str(candidato)
+    return str(carpeta / "yolov8n.onnx")
+
+
+def _leer_confianza(variable: str, por_defecto: float) -> float:
+    try:
+        valor = float(os.getenv(variable, str(por_defecto)))
+        return valor if 0 < valor < 1 else por_defecto
+    except ValueError:
+        return por_defecto
 
 
 def confianza_por_defecto() -> float:
-    try:
-        valor = float(os.getenv("YOLO_CONFIANZA_MINIMA", "0.4"))
-        return valor if 0 < valor < 1 else 0.4
-    except ValueError:
-        return 0.4
+    """Umbral para los objetos que no son personas ni sospechosos."""
+    return _leer_confianza("YOLO_CONFIANZA_MINIMA", 0.4)
