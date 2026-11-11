@@ -6,6 +6,7 @@ use App\Models\Acceso;
 use App\Models\Anomalia;
 use App\Models\Casillero;
 use App\Models\EventoCasillero;
+use App\Models\Evidencia;
 use App\Models\Organizacion;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -25,6 +26,9 @@ use Illuminate\Http\Request;
  * GET /api/usuario/comportamiento
  *   Su patrón de uso (el "normal" que aprende Isolation Forest): horario
  *   habitual, días que más usa, accesos por día y accesos por hora.
+ *
+ * GET /api/usuario/anomalias/{id}/evidencia
+ *   Foto de la camara de una anomalia de SU casillero (para "Mi actividad").
  *
  * GET /api/usuario/reporte
  *   Datos extra para el PDF "Descargar reporte": organización, periodo y
@@ -92,6 +96,16 @@ class PanelUsuarioController extends Controller
         'BLOQUEO'                   => ['Casillero bloqueado por el administrador', self::RIESGO_SEGURO],
         'DESBLOQUEO'                => ['Casillero desbloqueado por el administrador', self::RIESGO_SEGURO],
     ];
+
+    // Evento del casillero -> anomalia que crea (para enlazar la foto).
+    private const EVENTO_A_ANOMALIA = [
+        'APERTURA_NO_AUTORIZADA'    => 'APERTURA_NO_AUTORIZADA',
+        'VIBRACION_DETECTADA'       => 'VIBRACION',
+        'PUERTA_ABIERTA_PROLONGADA' => 'PUERTA_ABIERTA_PROLONGADA',
+    ];
+
+    // El evento y su anomalia se registran casi al mismo tiempo.
+    private const SEGUNDOS_ENLACE_EVENTO = 15;
 
     // Eventos causados por alguien desconocido o por el administrador.
     private const EVENTOS_DESCONOCIDO = ['APERTURA_NO_AUTORIZADA', 'VIBRACION_DETECTADA', 'PUERTA_ABIERTA_PROLONGADA'];
@@ -285,18 +299,25 @@ class PanelUsuarioController extends Controller
 
         $nombre = trim($usuario->nombre . ' ' . $usuario->apellido_pa);
 
+        // Anomalias de su casillero que tienen foto de la camara.
+        $anomaliasConFoto = Anomalia::query()
+            ->where('usuarios_id', $usuario->id)
+            ->whereHas('evidencias')
+            ->get(['id', 'tipo', 'casilleros_id', 'fecha_hora']);
+
         // 1) Accesos del usuario (autorizados y fallidos).
         $accesos = Acceso::query()
             ->where('usuarios_id', $usuario->id)
             ->get()
             ->map(fn (Acceso $acceso) => [
-                'clave'      => 'acceso-' . $acceso->id,
-                'usuario'    => $nombre,
-                'tipo'       => $this->tipoDeAcceso($acceso),
-                'riesgo'     => $acceso->resultado === Acceso::AUTORIZADO
+                'clave'       => 'acceso-' . $acceso->id,
+                'usuario'     => $nombre,
+                'tipo'        => $this->tipoDeAcceso($acceso),
+                'riesgo'      => $acceso->resultado === Acceso::AUTORIZADO
                     ? self::RIESGO_SEGURO
                     : self::RIESGO_SOSPECHOSO,
-                'fecha_hora' => $acceso->fecha_hora,
+                'fecha_hora'  => $acceso->fecha_hora,
+                'anomalia_id' => null,
             ]);
 
         // 2) Eventos de su casillero actual, desde que se le asignó.
@@ -315,15 +336,16 @@ class PanelUsuarioController extends Controller
                 ->whereIn('tipo_evento', array_keys(self::EVENTOS_ACTIVIDAD))
                 ->when($desde, fn ($q) => $q->where('fecha_hora', '>=', $desde))
                 ->get()
-                ->map(function (EventoCasillero $evento) use ($nombre) {
+                ->map(function (EventoCasillero $evento) use ($nombre, $anomaliasConFoto) {
                     [$tipo, $riesgo] = self::EVENTOS_ACTIVIDAD[$evento->tipo_evento];
 
                     return [
-                        'clave'      => 'evento-' . $evento->id,
-                        'usuario'    => $this->autorDeEvento($evento->tipo_evento, $nombre),
-                        'tipo'       => $tipo,
-                        'riesgo'     => $riesgo,
-                        'fecha_hora' => $evento->fecha_hora,
+                        'clave'       => 'evento-' . $evento->id,
+                        'usuario'     => $this->autorDeEvento($evento->tipo_evento, $nombre),
+                        'tipo'        => $tipo,
+                        'riesgo'      => $riesgo,
+                        'fecha_hora'  => $evento->fecha_hora,
+                        'anomalia_id' => $this->anomaliaConFotoDeEvento($evento, $anomaliasConFoto),
                     ];
                 });
         }
@@ -334,11 +356,12 @@ class PanelUsuarioController extends Controller
             ->whereIn('tipo', array_keys(self::ANOMALIAS_IA))
             ->get()
             ->map(fn (Anomalia $anomalia) => [
-                'clave'      => 'anomalia-' . $anomalia->id,
-                'usuario'    => 'Desconocido',
-                'tipo'       => self::ANOMALIAS_IA[$anomalia->tipo],
-                'riesgo'     => self::RIESGO_SOSPECHOSO,
-                'fecha_hora' => $anomalia->fecha_hora,
+                'clave'       => 'anomalia-' . $anomalia->id,
+                'usuario'     => 'Desconocido',
+                'tipo'        => self::ANOMALIAS_IA[$anomalia->tipo],
+                'riesgo'      => self::RIESGO_SOSPECHOSO,
+                'fecha_hora'  => $anomalia->fecha_hora,
+                'anomalia_id' => $anomaliasConFoto->contains('id', $anomalia->id) ? $anomalia->id : null,
             ]);
 
         // Todo junto, del más reciente al más antiguo.
@@ -359,12 +382,77 @@ class PanelUsuarioController extends Controller
             'riesgo'  => $registro['riesgo'],
             'fecha'   => $registro['fecha_hora']->format('d/m/Y'),
             'hora'    => $registro['fecha_hora']->format('H:i'),
+            // Si tiene foto de la camara: id de la anomalia (si no, null)
+            'anomalia_id' => $registro['anomalia_id'],
         ]);
 
         return response()->json([
             'total'       => $total,
             'actividades' => $actividades,
         ]);
+    }
+
+    public function evidencia(Request $request, int $id): JsonResponse
+    {
+        $usuario = $request->user();
+
+        abort_unless((int) $usuario->roles_id === self::ROL_USUARIO, 403,
+            'Solo los usuarios pueden ver las fotos de su casillero.');
+
+        // Solo anomalias de SU casillero.
+        $anomalia = Anomalia::query()
+            ->where('id', $id)
+            ->where('usuarios_id', $usuario->id)
+            ->first();
+
+        if (! $anomalia) {
+            return response()->json(['message' => 'Anomalía no encontrada.'], 404);
+        }
+
+        $evidencia = Evidencia::query()
+            ->where('anomalias_id', $anomalia->id)
+            ->orderByDesc('created_at')
+            ->first();
+
+        if (! $evidencia) {
+            return response()->json([
+                'message' => 'Esta foto ya no está disponible (las fotos se borran después de '
+                           . Evidencia::DIAS_RETENCION . ' días).',
+            ], 404);
+        }
+
+        return response()->json([
+            'tipo'        => self::TIPOS_ANOMALIA[$anomalia->tipo]
+                ?? ucfirst(strtolower(str_replace('_', ' ', $anomalia->tipo))),
+            'riesgo'      => self::RIESGOS[$anomalia->nivel_riesgo] ?? $anomalia->nivel_riesgo,
+            'descripcion' => $anomalia->descripcion,
+            'fecha'       => $anomalia->fecha_hora?->format('d/m/Y'),
+            'hora'        => $anomalia->fecha_hora?->format('H:i'),
+            'imagen'      => 'data:' . ($evidencia->mime ?: 'image/jpeg') . ';base64,' . $evidencia->imagen_base64,
+        ]);
+    }
+
+    /**
+     * Busca la anomalia (con foto) que corresponde a un evento del casillero:
+     * mismo casillero, mismo tipo y registrada casi al mismo tiempo.
+     */
+    private function anomaliaConFotoDeEvento(EventoCasillero $evento, $anomaliasConFoto): ?int
+    {
+        $tipo = self::EVENTO_A_ANOMALIA[$evento->tipo_evento] ?? null;
+
+        if (! $tipo || ! $evento->fecha_hora) {
+            return null;
+        }
+
+        $candidata = $anomaliasConFoto
+            ->filter(fn ($a) => $a->tipo === $tipo
+                && (int) $a->casilleros_id === (int) $evento->casilleros_id
+                && $a->fecha_hora
+                && abs($a->fecha_hora->diffInSeconds($evento->fecha_hora, false)) <= self::SEGUNDOS_ENLACE_EVENTO)
+            ->sortBy(fn ($a) => abs($a->fecha_hora->diffInSeconds($evento->fecha_hora, false)))
+            ->first();
+
+        return $candidata?->id;
     }
 
     public function reporte(Request $request): JsonResponse

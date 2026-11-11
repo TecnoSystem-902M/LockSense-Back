@@ -62,6 +62,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/usuario/actividad', [PanelUsuarioController::class, 'actividad']);
     Route::get('/usuario/comportamiento', [PanelUsuarioController::class, 'comportamiento']);
     Route::get('/usuario/reporte', [PanelUsuarioController::class, 'reporte']);
+    Route::get('/usuario/anomalias/{id}/evidencia', [PanelUsuarioController::class, 'evidencia'])
+    ->whereNumber('id');
 
     Route::get('/superadmin/organizaciones', [OrganizacionController::class, 'index']);
     Route::post('/superadmin/organizaciones', [OrganizacionController::class, 'store']);
