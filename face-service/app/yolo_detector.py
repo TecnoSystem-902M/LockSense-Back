@@ -18,6 +18,11 @@ cuchillo, tijeras, etc.). Para LockSense interesa:
   - Cuantas PERSONAS hay frente al casillero.
   - Si aparece algun OBJETO SOSPECHOSO (cuchillo, tijeras, bate).
 
+Fotos oscuras: la ESP32-CAM ve muy mal con poca luz. Si la foto esta oscura
+(brillo promedio menor a YOLO_BRILLO_MINIMO, por defecto 90), antes de
+analizarla se aclara (correccion gamma + CLAHE) y se corrige el tono verdoso.
+Se puede apagar con YOLO_MEJORAR_OSCURAS=false.
+
 Privacidad: no guarda imagenes ni las escribe en logs.
 """
 
@@ -63,6 +68,46 @@ NOMBRES_ES = {
 }
 
 TAMANO_ENTRADA = 640
+
+
+def _mejorar_si_oscura(imagen: np.ndarray) -> np.ndarray:
+    """
+    Aclara la foto si esta oscura, para que YOLO distinga mejor:
+      1. Correccion gamma (aclara las zonas oscuras sin quemar las claras).
+      2. CLAHE sobre la luminosidad (mejora el contraste por zonas).
+      3. Balance de grises (quita el tono verde/azul de la ESP32-CAM).
+    Si la foto ya tiene buena luz, se regresa igual.
+    """
+    if os.getenv("YOLO_MEJORAR_OSCURAS", "true").lower() in ("false", "0", "no"):
+        return imagen
+
+    try:
+        brillo_minimo = float(os.getenv("YOLO_BRILLO_MINIMO", "90"))
+    except ValueError:
+        brillo_minimo = 90.0
+
+    brillo = float(cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY).mean())
+    if brillo >= brillo_minimo:
+        return imagen
+
+    # 1) Gamma: entre mas oscura, mas se aclara.
+    gamma = 0.45 if brillo < 45 else (0.6 if brillo < 70 else 0.8)
+    tabla = (np.power(np.arange(256) / 255.0, gamma) * 255).clip(0, 255).astype(np.uint8)
+    salida = cv2.LUT(imagen, tabla)
+
+    # 2) CLAHE solo sobre la luminosidad (no altera los colores).
+    lab = cv2.cvtColor(salida, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+    salida = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+
+    # 3) Balance de grises: iguala el promedio de los 3 canales.
+    promedios = salida.reshape(-1, 3).mean(axis=0)
+    promedios[promedios == 0] = 1
+    salida = (salida * (promedios.mean() / promedios)).clip(0, 255).astype(np.uint8)
+
+    logger.info("Foto oscura (brillo %.0f): se aclaro antes de analizarla.", brillo)
+    return salida
 
 
 class DetectorYolo:
@@ -129,6 +174,8 @@ class DetectorYolo:
           [{"clase": "person", "confianza": 0.87, "caja": [x1, y1, x2, y2]}, ...]
         Las cajas estan en pixeles de la imagen original.
         """
+        imagen = _mejorar_si_oscura(imagen)
+
         alto, ancho = imagen.shape[:2]
         entrada, escala, relleno_x, relleno_y = self._preparar(imagen)
 
